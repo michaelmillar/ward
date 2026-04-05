@@ -144,7 +144,7 @@ Generic disk tools tell you where space has gone. `reap` knows what to do about 
 
 ## How it fits with pm
 
-`reap` optionally reads `pm`'s SQLite database to surface project status in `reap archive`. The dependency is one-way, `pm` does not know `reap` exists. This keeps the tools independent, `pm` answers "what should I work on", `reap` answers "what is wasting disk space". Different domain, different usage cadence (daily vs monthly).
+`reap` optionally reads [`pm`](https://github.com/michaelmillar/pm)'s SQLite database to surface project status in `reap archive`. The dependency is one-way, `pm` does not know `reap` exists. This keeps the tools independent, `pm` answers "what should I work on", `reap` answers "what is wasting disk space". Different domain, different usage cadence (daily vs monthly).
 
 ## Status
 
