@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 600" width="900" height="600" font-family="SF Mono, Menlo, Consolas, monospace" font-size="14">
+  <defs>
+    <linearGradient id="titlebar" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#3a3a3a"/>
+      <stop offset="100%" style="stop-color:#2a2a2a"/>
+    </linearGradient>
+  </defs>
+  <rect width="900" height="600" rx="10" fill="#1a1a1a"/>
+  <rect width="900" height="32" rx="10" fill="url(#titlebar)"/>
+  <rect y="22" width="900" height="10" fill="#2a2a2a"/>
+  <circle cx="20" cy="16" r="6" fill="#ff5f57"/>
+  <circle cx="40" cy="16" r="6" fill="#febc2e"/>
+  <circle cx="60" cy="16" r="6" fill="#28c840"/>
+  <text x="440" y="20" fill="#888" font-size="12">reap</text>
+
+  <g transform="translate(20, 60)">
+    <text fill="#d4d4d4"><tspan fill="#5fd7ff">$</tspan> reap status ~/projects</text>
+    <text y="24" fill="#888">Analysing /home/mark/projects ...</text>
+
+    <text y="60" fill="#d4d4d4" font-weight="bold" text-decoration="underline">Disk Usage Overview</text>
+    <text y="84" fill="#d4d4d4">  Total<tspan dx="114" font-weight="bold">11.0 GB</tspan></text>
+    <text y="104" fill="#d4d4d4">  Build artefacts<tspan dx="36" fill="#ff6b6b">2.0 GB</tspan><tspan fill="#d4d4d4"> (18%)</tspan></text>
+    <text y="124" fill="#d4d4d4">  Source and other<tspan dx="24" fill="#7fd87f">9.0 GB</tspan><tspan fill="#d4d4d4"> (81%)</tspan></text>
+    <text y="144" fill="#d4d4d4">  Git repositories<tspan dx="36">47</tspan></text>
+
+    <text y="180" fill="#d4d4d4" font-weight="bold" text-decoration="underline">Stalest Repositories</text>
+    <text y="204" fill="#d4d4d4">  ~/projects/old-prototype (579 KB, last commit<tspan dx="4" fill="#f5e072">2025-02-11</tspan>)</text>
+    <text y="224" fill="#d4d4d4">  ~/projects/experiment-alpha (870 KB, last commit<tspan dx="4" fill="#f5e072">2025-02-18</tspan>)</text>
+
+    <text y="268" fill="#d4d4d4"><tspan fill="#5fd7ff">$</tspan> reap clean ~/projects --older-than 60d</text>
+    <text y="292" fill="#888">Scanning /home/mark/projects for build artefacts...</text>
+    <text y="312" fill="#d4d4d4">  <tspan fill="#ff6b6b">2.0 GB</tspan> ~/projects/big-rust-app/target</text>
+    <text y="332" fill="#d4d4d4">  <tspan fill="#f5e072">163 MB</tspan> ~/projects/side-project/target</text>
+    <text y="360" fill="#d4d4d4">Total reclaimable<tspan dx="4" font-weight="bold">2.1 GB</tspan> across 2 artefact(s)</text>
+    <text y="388" fill="#f5e072">Dry run. Use --execute to actually remove artefacts.</text>
+
+    <text y="424" fill="#d4d4d4"><tspan fill="#5fd7ff">$</tspan> reap dupes ~/projects</text>
+    <text y="448" fill="#f5e072">Found 1 duplicate group(s).</text>
+    <text y="472" fill="#d4d4d4" font-weight="bold">  github.com/example/shared-lib</text>
+    <text y="492" fill="#d4d4d4">    [<tspan fill="#7fd87f" font-weight="bold">keep</tspan>]   ~/projects/project-a/deps/shared-lib</text>
+    <text y="512" fill="#d4d4d4">    [<tspan fill="#ff6b6b" font-weight="bold">remove</tspan>] ~/projects/project-b/deps/shared-lib</text>
+  </g>
+</svg>
