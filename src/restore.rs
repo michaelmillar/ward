@@ -5,6 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::bundle;
+use crate::git;
 use crate::manifest::{self, ArchiveFormat, Manifest};
 use crate::util::{archives_dir, format_size};
 
@@ -103,10 +104,13 @@ fn archive_paths(dir: &Path, name: &str) -> (PathBuf, PathBuf, PathBuf) {
     let bundle = dir.join(format!("{stem}.bundle"));
     let tar = dir.join(format!("{stem}.tar.gz"));
     let manifest = dir.join(format!("{stem}.json"));
+    let extras = dir.join(format!("{stem}.extras.tar.gz"));
+    let legacy = dir.join(format!("{stem}.untracked.tar.gz"));
+    let extras_file = if extras.exists() { extras } else { legacy };
     if bundle.exists() {
-        (bundle, dir.join(format!("{stem}.untracked.tar.gz")), manifest)
+        (bundle, extras_file, manifest)
     } else {
-        (tar, dir.join(format!("{stem}.untracked.tar.gz")), manifest)
+        (tar, extras_file, manifest)
     }
 }
 
@@ -143,25 +147,38 @@ fn verify_archive(dir: &Path, name: &str) -> Result<()> {
         println!("  {} git bundle verify", "ok".green().bold());
     }
 
-    if m.has_untracked {
+    if m.has_extras {
         if untracked.exists() {
             let u_sha = bundle::sha256_file(&untracked)?;
-            if let Some(exp) = &m.untracked_sha256 {
+            if let Some(exp) = &m.extras_sha256 {
                 if exp == &u_sha {
-                    println!("  {} untracked tar sha256", "ok".green().bold());
+                    println!("  {} extras tar sha256", "ok".green().bold());
                 } else {
-                    bail!("untracked tar sha256 mismatch");
+                    bail!("extras tar sha256 mismatch");
                 }
             }
         } else {
-            println!(
-                "  {} untracked tar missing",
-                "warn".yellow().bold()
-            );
+            println!("  {} extras tar missing", "warn".yellow().bold());
         }
     }
+    if m.stash_count > 0 {
+        println!(
+            "  {} {} stash(es) preserved as refs",
+            "ok".green().bold(),
+            m.stash_count
+        );
+    }
+    if m.has_hooks {
+        println!("  {} hooks preserved in extras", "ok".green().bold());
+    }
+    if m.has_config {
+        println!("  {} per-repo config preserved in extras", "ok".green().bold());
+    }
 
-    println!("{}", "Archive is restorable.".green().bold());
+    println!(
+        "{}",
+        "Archive refs, history, and local state are restorable.".green().bold()
+    );
     Ok(())
 }
 
@@ -202,8 +219,15 @@ fn restore_one(dir: &Path, name: &str) -> Result<()> {
             bundle::verify(&primary)?;
             bundle::restore_clone(&primary, &target)?;
             configure_remotes(&target, &m)?;
-            if m.has_untracked && untracked.exists() {
-                extract_untracked(&untracked, &target)?;
+            if m.stash_count > 0 {
+                bundle::fetch_custom_refs(&primary, &target, "refs/ward-stash/*")?;
+                let restored = git::restore_stash_refs(&target)?;
+                if restored > 0 {
+                    println!("  restored {} stash(es)", restored);
+                }
+            }
+            if m.has_extras && untracked.exists() {
+                extract_extras(&untracked, &target)?;
             }
         }
         ArchiveFormat::Tarball => {
@@ -236,10 +260,39 @@ fn configure_remotes(repo: &Path, m: &Manifest) -> Result<()> {
     Ok(())
 }
 
-fn extract_untracked(tar_path: &Path, target: &Path) -> Result<()> {
+fn extract_extras(tar_path: &Path, target: &Path) -> Result<()> {
     let file = fs::File::open(tar_path)?;
     let decoder = GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
     archive.unpack(target)?;
+
+    let ward_extras = target.join(".ward-extras");
+    if ward_extras.is_dir() {
+        let config_src = ward_extras.join("config");
+        if config_src.is_file() {
+            let config_dst = target.join(".git/config");
+            let _ = fs::copy(&config_src, &config_dst);
+        }
+        let hooks_src = ward_extras.join("hooks");
+        if hooks_src.is_dir() {
+            let hooks_dst = target.join(".git/hooks");
+            fs::create_dir_all(&hooks_dst)?;
+            if let Ok(entries) = fs::read_dir(&hooks_src) {
+                for entry in entries.flatten() {
+                    let src = entry.path();
+                    let dst = hooks_dst.join(entry.file_name());
+                    let _ = fs::copy(&src, &dst);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ =
+                            fs::set_permissions(&dst, fs::Permissions::from_mode(0o755));
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&ward_extras);
+    }
+
     Ok(())
 }

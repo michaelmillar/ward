@@ -2,11 +2,11 @@
   <img src="assets/logo.svg" width="200" alt="ward">
 </p>
 
-<h3 align="center">A git workspace lifecycle manager with provable safety</h3>
+<h3 align="center">Reclaim developer disk space with proof-before-delete Git archival</h3>
 
 <p align="center">
-  Classify, consolidate, bundle-archive, and restore git repositories.<br>
-  Dry-run by default. Every destructive action emits a safety proof and every archive is verified by clone.
+  Archive stale repos as Git bundles, verify by fresh clone, inspect pushed status and local state, then delete only when the evidence supports it.<br>
+  Preserves refs, commit history, stashes, hooks, per-repo config, and untracked files.
 </p>
 
 ---
@@ -19,7 +19,7 @@
 
 ## What it does
 
-`ward` treats your development workspace as a fleet of git repositories with lifecycles. It classifies each repo into one of six verdicts, archives stale repos as verified `git bundle` files with a manifest, consolidates duplicate clones into worktrees, and sweeps out build artefacts. The differentiator is **safety by evidence**. Every archive is verified by cloning the bundle into a temporary directory and comparing refs before the original is removed.
+`ward` treats your development workspace as a fleet of git repositories with lifecycles. It classifies each repo into one of six verdicts, archives stale repos as verified `git bundle` files with a manifest, consolidates duplicate clones into worktrees, and sweeps out build artefacts. The differentiator is **proof-before-delete**. Every archive is verified by cloning the bundle into a temporary directory and comparing refs before the original is removed. Stashes are preserved via temporary refs in the bundle. Hooks, per-repo config, and untracked files travel in a companion extras tar alongside the bundle.
 
 ```
 $ ward status ~/projects
@@ -58,18 +58,20 @@ $ ward archive ~/projects --execute
 
 ## How ward differs
 
-Most developer cleanup tools answer *"which files can I delete"*. Ward answers a different question. *"Which git repositories can I safely remove, and can you prove it?"*
+Existing tools mostly clean build artefacts or caches. Ward answers a different question. *"Which local git repositories can I archive and remove with evidence, and can I verify the archive before deletion?"*
 
-| Tool              | Bundle-based archive | Verify-by-clone | Worktree dedupe | Safety proofs | Rapid AI-prototype reclaim |
-|-------------------|----------------------|-----------------|-----------------|---------------|----------------------------|
-| `du` / `ncdu`     | No                   | No              | No              | No            | No                         |
-| `npkill`          | No                   | No              | No              | No            | Partial (node_modules)     |
-| `cargo-sweep`     | No                   | No              | No              | No            | Partial (Rust)             |
-| `devclean`        | No                   | No              | No              | No            | Partial (known caches)     |
-| `git bundle`      | Yes (primitive)      | No              | No              | No            | No                         |
-| **`ward`**        | **Yes**              | **Yes**         | **Yes**         | **Yes**       | **Yes**                    |
+| Tool              | Bundle-based archive | Verify-by-clone | Full state capture | Safety proofs | Prototype triage |
+|-------------------|----------------------|-----------------|--------------------|---------------|------------------|
+| `du` / `ncdu`     | No                   | No              | No                 | No            | No               |
+| `npkill`          | No                   | No              | No                 | No            | No               |
+| `cargo-sweep`     | No                   | No              | No                 | No            | No               |
+| `devclean`        | No                   | No              | No                 | No            | No               |
+| `git bundle`      | Yes (primitive)      | No              | Refs only          | No            | No               |
+| **`ward`**        | **Yes**              | **Yes**         | **Yes**            | **Yes**       | **Yes**          |
 
-**Strengths.** Bundle-based archival preserves full git history in a single verifiable file, roughly 30 to 70% smaller than tarring the working tree. Safety proofs show per-repo remote reachability, ref pushed status, stash count, uncommitted files, and local-only refs **before** any destructive action. Worktree planner converts duplicate clones of the same remote into git worktrees so you keep your branches without paying 4x disk cost. AI-prototype detection flags throwaway experiments (low commit count, short lifetime, single author) as a cohort you can bundle and remove in one command.
+Among the developer workspace cleanup tools reviewed, none performs a clone-verified Git archive check before deleting the source.
+
+**Strengths.** Bundle-based archival preserves refs and commit history. Companion extras tar preserves stashes (via temporary refs), hooks, per-repo config, and untracked files. Safety proofs show remote reachability, per-branch pushed status, stash count, local-only refs, submodule status, and untracked file count **before** any destructive action. Worktree planner converts duplicate clones of the same remote into git worktrees. Prototype triage surfaces throwaway experiments (low commit count, short lifetime, single author) as candidates for review, not automatic deletion.
 
 **Weaknesses.** No interactive TUI, keyboard-first stays in scope for a later release. No cloud backend for bundles, archives live at `~/.ward/archives/` only. Worktree conversion is experimental, it pushes local-only branches to the keeper's origin first, so offline-only branches require manual review.
 
@@ -256,19 +258,35 @@ ward scan --json | jq '.[].verdict' | sort | uniq -c  # example pipeline
 
 ## Architecture
 
-Ward uses `git bundle` as the archival primitive instead of tarballs. A bundle is a single file containing delta-compressed objects, refs, and config. It can be cloned from directly (`git clone repo.bundle newdir`) and verified without restoring (`git bundle verify`). This is roughly 30 to 70% smaller than tarring a working tree and it preserves branches, tags, and history as first-class citizens.
+### What the archive contains
+
+A ward archive is not just a Git bundle. It is three artefacts.
+
+| Artefact | Contents | Verified by |
+|----------|----------|-------------|
+| `<name>.bundle` | Refs, commits, trees, blobs, tags, stashes (via temporary refs) | SHA256 + clone-and-compare |
+| `<name>.extras.tar.gz` | Untracked files, `.git/config`, custom hooks | SHA256 |
+| `<name>.json` | Manifest with all metadata, hashes, and verification timestamps | Human and machine readable |
+
+A plain `git bundle --all` captures refs and reachable objects but **not** the working tree, stash reflog, hooks, or per-repo config. Ward fills those gaps explicitly.
+
+### Safety model
 
 The safety model stacks three checks.
 
-1. **Pre-flight assessment.** Before any action, assess each repo for remote presence, branch pushed status, uncommitted changes, stashes, local-only refs, untracked files, and worktrees.
-2. **Post-archive verification.** After writing a bundle, clone it into a temp directory and compare ref list and HEAD to the source. If anything mismatches, abort and keep the source.
-3. **Post-restore verification.** Before restoring, re-hash the bundle and confirm against the manifest. Refuse if the hash has changed since archive time.
+1. **Pre-flight assessment.** Before any action, assess each repo for remote presence, branch pushed status, uncommitted changes, stashes, local-only refs, untracked files, submodules, and worktrees.
+2. **Post-archive verification.** After writing a bundle, clone it into a temp directory and compare ref list and HEAD to the source. If anything mismatches, abort and keep the source. This is stronger than `git bundle verify`, which checks bundle validity and prerequisite history but does not simulate a full restore.
+3. **Post-restore verification.** Before restoring, re-hash the bundle and extras tar against the manifest. Refuse if hashes have changed since archive time.
 
 Every manifest records `verified_at` and `verifier_version` so you can audit what was checked and when.
 
+### What is not captured
+
+Modified tracked files in the working tree (uncommitted changes to tracked files) are not archived. Ward blocks archival when these are present rather than silently losing them. The index state is also not captured separately since it is derivable from HEAD for a clean working tree.
+
 ## Status
 
-Single binary, 2800 lines of Rust. Pure Rust, no runtime C dependencies (SQLite is bundled for optional pm integration).
+Single binary, ~3000 lines of Rust. Pure Rust, no runtime C dependencies (SQLite is bundled for optional pm integration).
 
 Not yet implemented.
 

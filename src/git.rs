@@ -290,6 +290,130 @@ pub fn worktree_paths(repo: &Path) -> Vec<PathBuf> {
     paths
 }
 
+pub fn stash_shas(repo: &Path) -> Vec<String> {
+    Command::new("git")
+        .args(["reflog", "show", "refs/stash", "--format=%H"])
+        .current_dir(repo)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn create_stash_refs(repo: &Path) -> Result<Vec<String>> {
+    let shas = stash_shas(repo);
+    for (i, sha) in shas.iter().enumerate() {
+        let refname = format!("refs/ward-stash/{i}");
+        let output = Command::new("git")
+            .args(["update-ref", &refname, sha])
+            .current_dir(repo)
+            .output()
+            .context("Failed to create stash ref")?;
+        if !output.status.success() {
+            let err = String::from_utf8_lossy(&output.stderr).to_string();
+            anyhow::bail!("update-ref failed for {refname}: {err}");
+        }
+    }
+    Ok(shas)
+}
+
+pub fn cleanup_stash_refs(repo: &Path) {
+    let output = Command::new("git")
+        .args(["for-each-ref", "--format=%(refname)", "refs/ward-stash/"])
+        .current_dir(repo)
+        .output();
+    if let Ok(o) = output {
+        let text = String::from_utf8_lossy(&o.stdout).to_string();
+        for refname in text.lines() {
+            let _ = Command::new("git")
+                .args(["update-ref", "-d", refname.trim()])
+                .current_dir(repo)
+                .output();
+        }
+    }
+}
+
+pub fn restore_stash_refs(repo: &Path) -> Result<u64> {
+    let output = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--sort=refname",
+            "--format=%(refname) %(objectname)",
+            "refs/ward-stash/",
+        ])
+        .current_dir(repo)
+        .output()
+        .context("Failed to list ward-stash refs")?;
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut count = 0u64;
+    for line in text.lines() {
+        let mut parts = line.splitn(2, ' ');
+        let Some(refname) = parts.next() else {
+            continue;
+        };
+        let Some(sha) = parts.next() else { continue };
+        let store = Command::new("git")
+            .args(["stash", "store", "-m", "restored by ward", sha.trim()])
+            .current_dir(repo)
+            .output();
+        if store.is_ok() {
+            count += 1;
+        }
+        let _ = Command::new("git")
+            .args(["update-ref", "-d", refname.trim()])
+            .current_dir(repo)
+            .output();
+    }
+    Ok(count)
+}
+
+pub fn has_submodules(repo: &Path) -> bool {
+    repo.join(".gitmodules").exists()
+}
+
+pub fn submodule_count(repo: &Path) -> u64 {
+    if !has_submodules(repo) {
+        return 0;
+    }
+    Command::new("git")
+        .args(["submodule", "status"])
+        .current_dir(repo)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count() as u64
+        })
+        .unwrap_or(0)
+}
+
+pub fn custom_hooks(repo: &Path) -> Vec<PathBuf> {
+    let hooks_dir = repo.join(".git/hooks");
+    if !hooks_dir.is_dir() {
+        return Vec::new();
+    }
+    std::fs::read_dir(&hooks_dir)
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && !p.to_string_lossy().ends_with(".sample"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub fn normalise_remote_url(url: &str) -> String {
     let s = url.trim();
     let s = s.strip_suffix(".git").unwrap_or(s);

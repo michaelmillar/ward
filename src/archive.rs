@@ -205,18 +205,42 @@ fn archive_one(a: &Assessment, archive_dir: &Path) -> Result<()> {
     let stamp = Utc::now().format("%Y%m%d%H%M%S").to_string();
     let stem = format!("{repo_name}-{stamp}");
     let bundle_path = archive_dir.join(format!("{stem}.bundle"));
-    let untracked_path = archive_dir.join(format!("{stem}.untracked.tar.gz"));
+    let extras_path = archive_dir.join(format!("{stem}.extras.tar.gz"));
     let manifest_path = archive_dir.join(format!("{stem}.json"));
 
+    let stash_shas = if a.stash_count > 0 {
+        println!("    preserving {} stash(es) as temp refs ...", a.stash_count);
+        git::create_stash_refs(&a.path).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     println!("  Bundling {} ...", a.path.display());
-    bundle::create(&a.path, &bundle_path).with_context(|| "git bundle create")?;
+    let bundle_result = bundle::create(&a.path, &bundle_path);
+    git::cleanup_stash_refs(&a.path);
+    bundle_result.with_context(|| "git bundle create")?;
+
     bundle::verify(&bundle_path).with_context(|| "git bundle verify")?;
     let bundle_sha = bundle::sha256_file(&bundle_path)?;
 
-    let untracked_sha = if a.untracked > 0 {
-        println!("    capturing {} untracked file(s)", a.untracked);
-        create_untracked_tar(&a.path, &untracked_path)?;
-        Some(bundle::sha256_file(&untracked_path)?)
+    let hooks = git::custom_hooks(&a.path);
+    let has_config = a.path.join(".git/config").exists();
+    let has_extras = a.untracked > 0 || !hooks.is_empty() || has_config;
+
+    let extras_sha = if has_extras {
+        let mut parts = Vec::new();
+        if a.untracked > 0 {
+            parts.push(format!("{} untracked", a.untracked));
+        }
+        if !hooks.is_empty() {
+            parts.push(format!("{} hook(s)", hooks.len()));
+        }
+        if has_config {
+            parts.push("config".to_string());
+        }
+        println!("    capturing extras [{}]", parts.join(", "));
+        create_extras_tar(&a.path, &extras_path, &hooks, has_config)?;
+        Some(bundle::sha256_file(&extras_path)?)
     } else {
         None
     };
@@ -224,6 +248,12 @@ fn archive_one(a: &Assessment, archive_dir: &Path) -> Result<()> {
     println!("    verifying by clone ...");
     let verified = bundle::verify_by_clone(&bundle_path)?;
     compare_refs(a, &verified)?;
+
+    let stash_refs_in_bundle = verified
+        .refs
+        .iter()
+        .filter(|(n, _)| n.starts_with("refs/ward-stash/"))
+        .count() as u64;
 
     let refs: Vec<RefEntry> = verified
         .refs
@@ -251,7 +281,7 @@ fn archive_one(a: &Assessment, archive_dir: &Path) -> Result<()> {
         archived_by: VERIFIER_VERSION.to_string(),
         size_bytes: a.size,
         bundle_sha256: Some(bundle_sha),
-        untracked_sha256: untracked_sha,
+        extras_sha256: extras_sha,
         head_sha: a.head_sha.clone(),
         refs,
         remotes,
@@ -260,9 +290,13 @@ fn archive_one(a: &Assessment, archive_dir: &Path) -> Result<()> {
         commit_count: a.commit_count,
         verified_at: Some(Utc::now().to_rfc3339()),
         verifier_version: Some(VERIFIER_VERSION.to_string()),
-        has_untracked: a.untracked > 0,
-        stash_count: a.stash_count,
+        has_extras,
+        stash_count: stash_refs_in_bundle,
+        stash_shas,
         tag_count: a.tag_count,
+        has_hooks: !hooks.is_empty(),
+        has_config,
+        submodule_count: a.submodule_count,
     };
 
     manifest::write(&manifest, &manifest_path)?;
@@ -293,7 +327,12 @@ fn compare_refs(a: &Assessment, verified: &bundle::VerifiedRefs) -> Result<()> {
     Ok(())
 }
 
-fn create_untracked_tar(repo: &Path, dest: &Path) -> Result<()> {
+fn create_extras_tar(
+    repo: &Path,
+    dest: &Path,
+    hooks: &[PathBuf],
+    include_config: bool,
+) -> Result<()> {
     let file = fs::File::create(dest)?;
     let encoder = GzEncoder::new(file, Compression::default());
     let mut archive = tar::Builder::new(encoder);
@@ -314,6 +353,23 @@ fn create_untracked_tar(repo: &Path, dest: &Path) -> Result<()> {
             archive.append_file(rel, &mut f)?;
         }
     }
+
+    if include_config {
+        let config_path = repo.join(".git/config");
+        if config_path.is_file() {
+            let mut f = fs::File::open(&config_path)?;
+            archive.append_file(".ward-extras/config", &mut f)?;
+        }
+    }
+
+    for hook in hooks {
+        if let Some(name) = hook.file_name() {
+            let mut f = fs::File::open(hook)?;
+            let tar_path = format!(".ward-extras/hooks/{}", name.to_string_lossy());
+            archive.append_file(tar_path, &mut f)?;
+        }
+    }
+
     archive.finish()?;
     Ok(())
 }

@@ -26,6 +26,7 @@ pub struct Assessment {
     pub ignored: u64,
     pub dirty: bool,
     pub worktree_count: u64,
+    pub submodule_count: u64,
     pub verdict: Verdict,
 }
 
@@ -68,11 +69,11 @@ pub fn assess_repo(path: &Path, thresholds: &Thresholds) -> Result<Assessment> {
     let (untracked, ignored) = git::untracked_count(path).unwrap_or((0, 0));
     let dirty = git::has_uncommitted_changes(path).unwrap_or(true);
     let worktree_count = git::worktree_paths(path).len().saturating_sub(1) as u64;
+    let submodule_count = git::submodule_count(path);
 
     let all_pushed = branches.iter().all(|b| b.upstream.is_some() && b.ahead == 0);
     let has_local_only = branches.iter().any(|b| b.upstream.is_none());
     let has_ahead = branches.iter().any(|b| b.ahead > 0);
-    let has_stash = stash_count > 0;
 
     let age_days = last_commit.map(|d| {
         (Utc::now().date_naive() - d).num_days()
@@ -87,7 +88,6 @@ pub fn assess_repo(path: &Path, thresholds: &Thresholds) -> Result<Assessment> {
         all_pushed,
         has_local_only,
         has_ahead,
-        has_stash,
         dirty,
         commit_count,
         author_count,
@@ -113,6 +113,7 @@ pub fn assess_repo(path: &Path, thresholds: &Thresholds) -> Result<Assessment> {
         ignored,
         dirty,
         worktree_count,
+        submodule_count,
         verdict,
     })
 }
@@ -122,7 +123,6 @@ fn classify(
     all_pushed: bool,
     has_local_only: bool,
     has_ahead: bool,
-    has_stash: bool,
     dirty: bool,
     commit_count: u64,
     author_count: u64,
@@ -144,7 +144,7 @@ fn classify(
                 .unwrap_or(false)
     };
 
-    if dirty || has_stash {
+    if dirty {
         return Verdict::HasLocalWork;
     }
     if !has_remote {
@@ -216,6 +216,12 @@ pub fn print_safety_proof(a: &Assessment) {
         a.ignored.to_string().dimmed()
     );
     println!("      worktrees        {}", a.worktree_count.to_string().dimmed());
+    if a.submodule_count > 0 {
+        println!(
+            "      submodules       {}",
+            a.submodule_count.to_string().yellow().bold()
+        );
+    }
     println!("      size             {}", format_size(a.size).bold());
 }
 

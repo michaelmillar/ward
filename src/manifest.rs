@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-pub const MANIFEST_VERSION: u32 = 2;
+pub const MANIFEST_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Manifest {
@@ -14,7 +14,7 @@ pub struct Manifest {
     pub archived_by: String,
     pub size_bytes: u64,
     pub bundle_sha256: Option<String>,
-    pub untracked_sha256: Option<String>,
+    pub extras_sha256: Option<String>,
     pub head_sha: Option<String>,
     pub refs: Vec<RefEntry>,
     pub remotes: Vec<RemoteEntry>,
@@ -23,9 +23,13 @@ pub struct Manifest {
     pub commit_count: u64,
     pub verified_at: Option<String>,
     pub verifier_version: Option<String>,
-    pub has_untracked: bool,
+    pub has_extras: bool,
     pub stash_count: u64,
+    pub stash_shas: Vec<String>,
     pub tag_count: u64,
+    pub has_hooks: bool,
+    pub has_config: bool,
+    pub submodule_count: u64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]

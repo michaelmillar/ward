@@ -69,6 +69,21 @@ pub fn restore_clone(bundle: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn fetch_custom_refs(bundle: &Path, repo: &Path, refspec: &str) -> Result<()> {
+    let output = Command::new("git")
+        .args(["fetch"])
+        .arg(bundle)
+        .arg(format!("{refspec}:{refspec}"))
+        .current_dir(repo)
+        .output()
+        .context("Failed to fetch custom refs from bundle")?;
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr).to_string();
+        bail!("fetch custom refs failed: {err}");
+    }
+    Ok(())
+}
+
 pub fn verify_by_clone(bundle: &Path) -> Result<VerifiedRefs> {
     let tmp = tempfile::tempdir().context("Failed to create temp dir for verify")?;
     let target = tmp.path().join("verify");
