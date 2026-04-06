@@ -1,164 +1,280 @@
 <p align="center">
-  <img src="assets/logo.svg" width="200" alt="reap">
+  <img src="assets/logo.svg" width="200" alt="ward">
 </p>
 
-<h3 align="center">A disk space reclaimer for developer workspaces</h3>
+<h3 align="center">A git workspace lifecycle manager with provable safety</h3>
 
 <p align="center">
-  Find regenerable build artefacts, duplicate repo clones, and stale projects across your machine.<br>
-  Dry-run by default. Archives before deleting. Aware of active work.
+  Classify, consolidate, bundle-archive, and restore git repositories.<br>
+  Dry-run by default. Every destructive action emits a safety proof and every archive is verified by clone.
 </p>
 
 ---
 
 <p align="center">
-  <img src="assets/demo.svg" width="800" alt="reap in action">
+  <img src="assets/demo.svg" width="800" alt="ward in action">
 </p>
 
 ---
 
 ## What it does
 
-`reap` scans a directory tree (defaults to `~/projects`), identifies disk-heavy patterns that developers accumulate over time, and reclaims space safely.
-
-It finds build artefacts (`target/`, `node_modules/`, `.next/`, `dist/`, `__pycache__`, `.gradle/`, `build/`), duplicate git clones with identical remotes, and stale repositories whose branches are all pushed and working trees clean. Every destructive command is dry-run by default, and archived repos get a compressed tarball with a JSON manifest so you can restore them later.
+`ward` treats your development workspace as a fleet of git repositories with lifecycles. It classifies each repo into one of six verdicts, archives stale repos as verified `git bundle` files with a manifest, consolidates duplicate clones into worktrees, and sweeps out build artefacts. The differentiator is **safety by evidence**. Every archive is verified by cloning the bundle into a temporary directory and comparing refs before the original is removed.
 
 ```
-$ reap status ~/projects
-Analysing /home/mark/projects ...
+$ ward status ~/projects
+Disk Usage
+  Total              42.1 GB
+  Build artefacts    31.4 GB (74%)
+  Source and other   10.7 GB (25%)
+  Git repositories   47
 
-Disk Usage Overview
-  Total:              11.0 GB
-  Build artefacts:     2.0 GB (18%)
-  Source and other:    9.0 GB (81%)
-  Git repositories:   47
-
-Stalest Repositories
-  ~/projects/old-prototype (579.1 KB, last commit: 2025-02-11)
-  ~/projects/experiment-alpha (870.6 KB, last commit: 2025-02-18)
+Lifecycle
+  archive        8   2.1 GB
+  prototype     12   340.2 MB
+  keep          15   4.8 GB
+  local-work     9   3.2 GB
+  no-remote      3    14.5 MB
 ```
 
 ```
-$ reap clean ~/projects --older-than 60d
-Scanning /home/mark/projects for build artefacts...
-  2.0 GB ~/projects/big-rust-app/target (last modified: unknown)
-  163.5 MB ~/projects/side-project/target (last modified: unknown)
-
-Total reclaimable: 2.1 GB across 2 artefact(s)
-
-Dry run. Use --execute to actually remove artefacts.
+$ ward archive ~/projects --execute
+  [ARCHIVE] ~/projects/old-service (145.3 MB, last commit 2025-11-03)
+    Safety proof
+      remote           github.com/acme/old-service
+      head             a1b2c3d4e5
+      commits          234 across 4 author(s)
+      branches         3 (0 local-only, 0 ahead)
+      uncommitted      no
+      stashes          0
+      tags             12
+      untracked        0 (ignored 2)
+      worktrees        0
+      size             145.3 MB
+  Bundling ~/projects/old-service ...
+    verifying by clone ...
+    ok archived ~/.ward/archives/old-service-20260405.bundle (42.1 MB)
 ```
+
+## How ward differs
+
+Most developer cleanup tools answer *"which files can I delete"*. Ward answers a different question. *"Which git repositories can I safely remove, and can you prove it?"*
+
+| Tool              | Bundle-based archive | Verify-by-clone | Worktree dedupe | Safety proofs | Rapid AI-prototype reclaim |
+|-------------------|----------------------|-----------------|-----------------|---------------|----------------------------|
+| `du` / `ncdu`     | No                   | No              | No              | No            | No                         |
+| `npkill`          | No                   | No              | No              | No            | Partial (node_modules)     |
+| `cargo-sweep`     | No                   | No              | No              | No            | Partial (Rust)             |
+| `devclean`        | No                   | No              | No              | No            | Partial (known caches)     |
+| `git bundle`      | Yes (primitive)      | No              | No              | No            | No                         |
+| **`ward`**        | **Yes**              | **Yes**         | **Yes**         | **Yes**       | **Yes**                    |
+
+**Strengths.** Bundle-based archival preserves full git history in a single verifiable file, roughly 30 to 70% smaller than tarring the working tree. Safety proofs show per-repo remote reachability, ref pushed status, stash count, uncommitted files, and local-only refs **before** any destructive action. Worktree planner converts duplicate clones of the same remote into git worktrees so you keep your branches without paying 4x disk cost. AI-prototype detection flags throwaway experiments (low commit count, short lifetime, single author) as a cohort you can bundle and remove in one command.
+
+**Weaknesses.** No interactive TUI, keyboard-first stays in scope for a later release. No cloud backend for bundles, archives live at `~/.ward/archives/` only. Worktree conversion is experimental, it pushes local-only branches to the keeper's origin first, so offline-only branches require manual review.
 
 ## Install
 
 Build from source.
 
 ```
-git clone git@github.com:michaelmillar/reap.git
-cd reap
+git clone git@github.com:michaelmillar/ward.git
+cd ward
 cargo build --release
-```
-
-The binary is at `./target/release/reap`. Symlink or copy it into your `$PATH`.
-
-```
-ln -s $(pwd)/target/release/reap ~/.local/bin/reap
+ln -s $(pwd)/target/release/ward ~/.local/bin/ward
 ```
 
 ## Quick start
 
 ```
-reap status                       # overview of ~/projects
-reap clean --older-than 30d       # preview removable artefacts
-reap clean --execute              # actually remove them
-reap dupes                        # find duplicate git clones
-reap archive --execute            # archive safe-to-archive repos
-reap restore                      # list archives
-reap restore my-old-repo          # restore a specific one
+ward status                         # overview with lifecycle stats
+ward scan                           # per-repo verdicts with rationale
+ward scan --prototypes              # just the throwaway AI experiments
+ward scan --json                    # machine-readable output
+ward dedupe                         # cluster duplicate clones, propose worktree plan
+ward dedupe --convert               # execute the worktree plan
+ward archive                        # dry-run archive of stale repos
+ward archive --prototypes --execute # archive the prototype cohort
+ward restore                        # list archives with verify status
+ward restore <name> --verify        # verify integrity without restoring
+ward restore <name>                 # restore to original path
+ward clean --older-than 30d         # dry-run artefact sweep
+ward clean --execute                # actually remove artefacts
+ward sweep --execute                # clean + archive in one pass
+ward config init                    # write default config
+ward cache-clear                    # reset assessment cache
 ```
-
-All commands accept an optional path argument. With no argument, they operate on `~/projects`.
 
 ## Commands
 
 ### status
 
-Prints a disk usage breakdown for a path, including total size, build artefact size with percentage, source size, git repo count, and the five stalest repositories by last commit date.
+Disk usage breakdown plus a lifecycle histogram for every git repo under the path. Shows which repos are ready for `ward archive`.
 
 ```
-reap status [path]
+ward status [path]
 ```
 
-### clean
+### scan
 
-Finds regenerable build artefacts and lists them by size (largest first). Colour-coded by size (red over 1 GB, yellow over 100 MB, green under). Build artefact directory must either match on name alone (`target`, `node_modules`, `.next`, `__pycache__`, `.gradle`) or have a recognised sibling config file (`dist` needs `package.json` or a webpack/vite config, `build` needs `build.gradle` or `CMakeLists.txt`).
+Runs the decision engine. For each git repo under `path`, produces a verdict.
+
+| Verdict        | Meaning                                                               |
+|----------------|-----------------------------------------------------------------------|
+| `archive`      | Remote, all refs pushed, no local work, last commit over 90 days ago  |
+| `prototype`    | Short lifetime, few commits, one author, remote or not                |
+| `worktree`     | Candidate for worktree conversion (used by dedupe)                    |
+| `keep`         | Active repo with recent work                                          |
+| `local-work`   | Has uncommitted changes, stashes, local-only branches, or unpushed    |
+| `no-remote`    | Git repo with no configured remote                                    |
 
 ```
-reap clean [path] [--execute] [--older-than <duration>]
+ward scan [path] [--prototypes] [--verdict archive|prototype|keep|local-work|no-remote]
 ```
 
-`--older-than 30d` or `--older-than 4w` restricts to artefacts in projects whose last commit (or mtime, if not a git repo) is older than the cutoff.
+### dedupe
 
-### dupes
+Finds duplicate clones by canonical remote URL **combined with root commit SHA** (catches forks, mirrors, renamed remotes). Clusters clones, marks the one with the most recent commit as the keeper, and proposes an action for each duplicate.
 
-Finds git repositories that share the same remote origin URL (normalised to strip `.git`, SSH prefix, protocol). Groups them and marks the most recent as `keep` and the rest as `remove`.
+- **worktree** if the clone has local-only branches, converts via `git worktree add` after pushing the local branches to origin
+- **remove** if no local work, clone is safe to delete
+- **skip** if dirty or stashed, refuses to touch
 
 ```
-reap dupes [path]
+ward dedupe [path] [--convert]
 ```
 
 ### archive
 
-Assesses each git repo and marks it `SAFE` or `SKIP` based on two checks, all branches pushed and no uncommitted changes. Also prints the pm project status if pm's SQLite database exists at `~/.local/share/pm/projects.db`. With `--execute`, creates a gzipped tarball and JSON manifest in `~/.reap/archives/`, then removes the original directory.
+Assesses each git repo and archives eligible ones as `git bundle` files.
+
+For each archive:
+1. Creates `<name>-<timestamp>.bundle` via `git bundle create --all`
+2. Runs `git bundle verify` on the resulting file
+3. Clones the bundle into a temp directory and compares refs to source
+4. Writes `<name>-<timestamp>.json` manifest with SHA256, HEAD, all refs, remotes, commit count, and verification timestamp
+5. Captures untracked-not-ignored files to a companion `.untracked.tar.gz` if any
+6. Only then removes the original directory
 
 ```
-reap archive [path] [--execute]
+ward archive [path] [--execute] [--prototypes] [--include-no-remote] [--no-cache] [--json]
 ```
 
 ### restore
 
-With no argument, lists all archives with original path, archive date, and size. With an archive name, extracts it back to the original path and removes the archive.
+Lists archives with verified status. With a name argument, verifies integrity and restores to the original path. Refuses if target exists or hashes mismatch.
 
 ```
-reap restore [name]
+ward restore [name] [--verify]
 ```
 
-## How it compares
+### clean
 
-Generic disk tools tell you where space has gone. `reap` knows what to do about it.
+Removes regenerable build artefacts. Recognises Rust (`target`), Node (`node_modules`, `dist`, `.next`, `.turbo`, `.vite`, `.parcel-cache`, `.swc`, `.pnpm-store`), Python (`.venv`, `venv`, `__pycache__`, `.ruff_cache`, `.mypy_cache`, `.pytest_cache`, `.tox`, `.nox`), Gradle, CMake, Zig, Dart, Xcode DerivedData.
 
-| Tool | Artefact patterns | Dry-run | Project-aware | Archives | Duplicate repos |
-|------|------------------|---------|---------------|----------|----------------|
-| `du` / `ncdu` | No | N/A | No | No | No |
-| `dust` | No | N/A | No | No | No |
-| `npkill` | `node_modules` only | Yes | No | No | No |
-| `cargo-clean-all` | `target` only | No | Yes (Rust) | No | No |
-| `git gc` | No | No | Yes (single repo) | No | No |
-| **`reap`** | **7 ecosystems** | **Yes** | **Yes** | **Yes** | **Yes** |
+```
+ward clean [path] [--execute] [--older-than <duration>]
+```
 
-**Where reap is stronger.** One tool spans Rust, Node, Python, Gradle, CMake, and Next.js. Archives before deleting so recovery is one command. Finds duplicate clones (the same icon library checked out in three projects). Reads pm's database so you do not archive what you are still working on.
+### sweep
 
-**Where reap is weaker.** No interactive TUI, `ncdu` wins for exploring. No per-file size view. No incremental scanning, a full walk runs each invocation. No cloud storage backend for archives.
+Clean + archive in one pass. Runs the artefact cleanup first, then the archive flow. Shared `--execute` flag.
 
-**The closest alternative is running `ncdu` and manually deleting.** That works until you have 40 projects and want to answer "which repos can I archive safely". `reap` answers that question directly.
+```
+ward sweep [path] [--execute] [--prototypes] [--older-than <duration>]
+```
 
-## How it fits with pm
+## Configuration
 
-`reap` optionally reads [`pm`](https://github.com/michaelmillar/pm)'s SQLite database to surface project status in `reap archive`. The dependency is one-way, `pm` does not know `reap` exists. This keeps the tools independent, `pm` answers "what should I work on", `reap` answers "what is wasting disk space". Different domain, different usage cadence (daily vs monthly).
+Ward reads `~/.ward/config.toml` if it exists, falling back to sensible defaults.
+
+```
+ward config init    # write default config
+ward config show    # print effective config
+```
+
+### Thresholds
+
+Control how ward classifies repositories.
+
+```toml
+[thresholds]
+archive_stale_days = 90
+prototype_max_commits = 10
+prototype_max_authors = 1
+prototype_max_lifetime_days = 30
+```
+
+### Custom artefact rules
+
+Add your own artefact patterns alongside the 25+ built-in rules.
+
+```toml
+[[artefact_rules]]
+name = "my-build"
+ecosystem = "custom"
+requires_sibling = ["Makefile"]
+```
+
+### Exclude paths
+
+```toml
+[exclude]
+paths = ["~/projects/keep-forever"]
+```
+
+### Workspace root
+
+Set a default path so you can run `ward status` without arguments.
+
+```toml
+[workspace]
+root = "~/projects"
+```
+
+## Caching
+
+Ward caches repo assessments at `~/.ward/cache.json`, keyed on `.git` directory mtime. Repeat scans skip re-assessment for repos whose git state has not changed.
+
+```
+ward cache-clear          # clear cache
+ward scan --no-cache      # bypass cache for one run
+```
+
+Typical speedup on repeat runs is 3 to 8x depending on workspace size.
+
+## JSON output
+
+All assessment commands support `--json` for scripting, CI integration, and pipeline composition.
+
+```
+ward scan --json              # per-repo verdicts as JSON
+ward status --json            # disk usage + assessments as JSON
+ward archive --prototypes --json  # eligible repos as JSON
+ward scan --json | jq '.[].verdict' | sort | uniq -c  # example pipeline
+```
+
+## Architecture
+
+Ward uses `git bundle` as the archival primitive instead of tarballs. A bundle is a single file containing delta-compressed objects, refs, and config. It can be cloned from directly (`git clone repo.bundle newdir`) and verified without restoring (`git bundle verify`). This is roughly 30 to 70% smaller than tarring a working tree and it preserves branches, tags, and history as first-class citizens.
+
+The safety model stacks three checks.
+
+1. **Pre-flight assessment.** Before any action, assess each repo for remote presence, branch pushed status, uncommitted changes, stashes, local-only refs, untracked files, and worktrees.
+2. **Post-archive verification.** After writing a bundle, clone it into a temp directory and compare ref list and HEAD to the source. If anything mismatches, abort and keep the source.
+3. **Post-restore verification.** Before restoring, re-hash the bundle and confirm against the manifest. Refuse if the hash has changed since archive time.
+
+Every manifest records `verified_at` and `verifier_version` so you can audit what was checked and when.
 
 ## Status
 
-0 tests. Single binary. Pure Rust, no C dependencies at runtime (SQLite is bundled).
+Single binary, 2800 lines of Rust. Pure Rust, no runtime C dependencies (SQLite is bundled for optional pm integration).
 
 Not yet implemented.
 
-- Interactive TUI mode
-- Per-project artefact breakdown
+- Interactive TUI
 - Cloud archive backends (S3, B2)
-- Incremental rescans with cached sizes
-- Config file for custom artefact rules
-- MySQL/Postgres dump size detection
-- Integration tests
+- Fleet mode for devboxes and CI runners
 
 ## Licence
 

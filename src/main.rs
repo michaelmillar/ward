@@ -1,14 +1,27 @@
 mod archive;
+mod assess;
+mod bundle;
+mod cache;
 mod clean;
-mod dupes;
+mod config;
+mod dedupe;
+mod git;
+mod manifest;
+mod restore;
 mod scan;
 mod status;
+mod sweep;
+mod util;
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "reap", about = "Disk space reclaimer for developers")]
+#[command(
+    name = "ward",
+    version,
+    about = "Git workspace lifecycle manager with provable safety"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -16,45 +29,139 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    #[command(about = "Overview of workspace disk usage and repo lifecycle")]
+    Status {
+        path: Option<PathBuf>,
+        #[arg(long, help = "Bypass the repo assessment cache")]
+        no_cache: bool,
+        #[arg(long, help = "Emit JSON")]
+        json: bool,
+    },
+
+    #[command(about = "Classify each repo with a verdict and rationale")]
+    Scan {
+        path: Option<PathBuf>,
+        #[arg(long, help = "Show only prototype repos")]
+        prototypes: bool,
+        #[arg(long, help = "Filter by verdict: archive, prototype, keep, local-work, no-remote")]
+        verdict: Option<String>,
+        #[arg(long, help = "Bypass the repo assessment cache")]
+        no_cache: bool,
+        #[arg(long, help = "Emit JSON")]
+        json: bool,
+    },
+
+    #[command(about = "Find duplicate clones and propose worktree conversion plan")]
+    Dedupe {
+        path: Option<PathBuf>,
+        #[arg(long, help = "Execute the conversion plan")]
+        convert: bool,
+    },
+
+    #[command(about = "Bundle, verify, and archive stale git repos with safety proofs")]
+    Archive {
+        path: Option<PathBuf>,
+        #[arg(long, help = "Actually archive (default is dry run)")]
+        execute: bool,
+        #[arg(long, help = "Also include prototype repos")]
+        prototypes: bool,
+        #[arg(long, help = "Also include repos without a remote")]
+        include_no_remote: bool,
+        #[arg(long, help = "Bypass the repo assessment cache")]
+        no_cache: bool,
+        #[arg(long, help = "Emit JSON of eligible repos")]
+        json: bool,
+    },
+
+    #[command(about = "Manage ward configuration")]
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+
+    #[command(about = "Clear the assessment cache")]
+    CacheClear,
+
+    #[command(about = "List or restore archived repos with integrity verification")]
+    Restore {
+        name: Option<String>,
+        #[arg(long, help = "Verify archive integrity without restoring")]
+        verify: bool,
+    },
+
     #[command(about = "Find and remove regenerable build artefacts")]
     Clean {
         path: Option<PathBuf>,
         #[arg(long, help = "Actually delete artefacts (default is dry run)")]
         execute: bool,
-        #[arg(long, help = "Only show artefacts in projects not modified in N days (e.g. 30d, 4w)")]
+        #[arg(long, help = "Only artefacts in projects not modified in N days (e.g. 30d, 4w)")]
         older_than: Option<String>,
     },
-    #[command(about = "Find duplicate git repos with the same remote")]
-    Dupes {
+
+    #[command(about = "Bulk reclaim: clean + archive in one pass")]
+    Sweep {
         path: Option<PathBuf>,
-    },
-    #[command(about = "Assess and archive stale git repos")]
-    Archive {
-        path: Option<PathBuf>,
-        #[arg(long, help = "Actually archive safe repos (default is dry run)")]
+        #[arg(long, help = "Actually execute (default is dry run)")]
         execute: bool,
+        #[arg(long, help = "Include prototype repos in archive step")]
+        prototypes: bool,
+        #[arg(long, help = "Only artefacts in projects not modified in N days")]
+        older_than: Option<String>,
     },
-    #[command(about = "Restore a previously archived repo")]
-    Restore {
-        name: Option<String>,
-    },
-    #[command(about = "Overview of disk usage across projects")]
-    Status {
-        path: Option<PathBuf>,
-    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    #[command(about = "Write a default config file to ~/.ward/config.toml")]
+    Init,
+    #[command(about = "Print the effective configuration")]
+    Show,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Status {
+            path,
+            no_cache,
+            json,
+        } => status::run(path, no_cache, json),
+        Commands::Scan {
+            path,
+            prototypes,
+            verdict,
+            no_cache,
+            json,
+        } => scan::run(path, prototypes, verdict, no_cache, json),
+        Commands::Dedupe { path, convert } => dedupe::run(path, convert),
+        Commands::Archive {
+            path,
+            execute,
+            prototypes,
+            include_no_remote,
+            no_cache,
+            json,
+        } => archive::run(path, execute, prototypes, include_no_remote, no_cache, json),
+        Commands::Restore { name, verify } => restore::run(name, verify),
         Commands::Clean {
             path,
             execute,
             older_than,
         } => clean::run(path, execute, older_than),
-        Commands::Dupes { path } => dupes::run(path),
-        Commands::Archive { path, execute } => archive::run(path, execute),
-        Commands::Restore { name } => archive::restore(name),
-        Commands::Status { path } => status::run(path),
+        Commands::Sweep {
+            path,
+            execute,
+            prototypes,
+            older_than,
+        } => sweep::run(path, execute, prototypes, older_than),
+        Commands::Config { action } => match action {
+            ConfigAction::Init => config::init_command(),
+            ConfigAction::Show => config::show_command(),
+        },
+        Commands::CacheClear => {
+            cache::Cache::clear()?;
+            println!("Cache cleared.");
+            Ok(())
+        }
     }
 }

@@ -1,115 +1,184 @@
-use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use walkdir::WalkDir;
+use anyhow::{Result, bail};
+use colored::Colorize;
+use rayon::prelude::*;
+use std::path::PathBuf;
 
-pub fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    const TB: u64 = GB * 1024;
+use crate::assess::{Assessment, Verdict, assess_repo};
+use crate::cache::Cache;
+use crate::config::Config;
+use crate::git;
+use crate::util::{default_projects_path, format_size};
 
-    if bytes >= TB {
-        format!("{:.1} TB", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{bytes} B")
+pub fn run(
+    path: Option<PathBuf>,
+    prototypes_only: bool,
+    verdict_filter: Option<String>,
+    no_cache: bool,
+    as_json: bool,
+) -> Result<()> {
+    let cfg = Config::load();
+    let root = path
+        .or_else(|| cfg.workspace_root())
+        .unwrap_or_else(default_projects_path);
+    if !root.exists() {
+        bail!("Path does not exist: {}", root.display());
     }
-}
 
-pub fn dir_size(path: &Path) -> u64 {
-    WalkDir::new(path)
+    if !as_json {
+        println!("{}", format!("Scanning {} ...", root.display()).dimmed());
+    }
+
+    let repos: Vec<_> = git::find_git_repos(&root)
         .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .filter_map(|e| e.metadata().ok())
-        .map(|m| m.len())
-        .sum()
-}
-
-pub fn find_git_repos(root: &Path) -> Vec<PathBuf> {
-    let mut repos = Vec::new();
-    let walker = WalkDir::new(root).into_iter();
-    for entry in walker.filter_entry(|e| {
-        let name = e.file_name().to_string_lossy();
-        if name == ".git" {
-            return false;
+        .filter(|r| !cfg.is_excluded(r))
+        .collect();
+    if repos.is_empty() {
+        if !as_json {
+            println!("{}", "No git repos found.".yellow());
+        } else {
+            println!("[]");
         }
-        !name.starts_with('.') || e.depth() == 0
-    }) {
-        let Ok(entry) = entry else { continue };
-        if entry.file_type().is_dir() && entry.path().join(".git").is_dir() {
-            repos.push(entry.path().to_path_buf());
-        }
+        return Ok(());
     }
-    repos
-}
 
-pub fn git_remote_url(repo: &Path) -> Option<String> {
-    Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .current_dir(repo)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-}
+    let mut cache = if no_cache { Cache::default() } else { Cache::load() };
+    let thresholds = cfg.thresholds.clone();
 
-pub fn last_commit_date(repo: &Path) -> Option<chrono::NaiveDate> {
-    Command::new("git")
-        .args(["log", "-1", "--format=%aI"])
-        .current_dir(repo)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            chrono::DateTime::parse_from_rfc3339(&s)
-                .ok()
-                .map(|dt| dt.date_naive())
+    let mut assessments: Vec<Assessment> = repos
+        .par_iter()
+        .filter_map(|r| {
+            if !no_cache {
+                if let Some(a) = cache.lookup(r) {
+                    return Some(a.clone());
+                }
+            }
+            assess_repo(r, &thresholds).ok()
         })
-}
+        .collect();
 
-pub fn has_uncommitted_changes(repo: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(repo)
-        .output()
-        .context("Failed to run git status")?;
-    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
-}
-
-pub fn all_branches_pushed(repo: &Path) -> Result<bool> {
-    let output = Command::new("git")
-        .args(["branch", "-v", "--no-color"])
-        .current_dir(repo)
-        .output()
-        .context("Failed to run git branch")?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    for line in text.lines() {
-        if line.contains("[ahead") {
-            return Ok(false);
+    if !no_cache {
+        for a in &assessments {
+            cache.store(&a.path, a.clone());
         }
+        let _ = cache.save();
     }
-    Ok(true)
+
+    let filter_verdict = verdict_filter
+        .as_deref()
+        .and_then(|s| parse_verdict(s));
+
+    if let Some(v) = filter_verdict {
+        assessments.retain(|a| a.verdict == v);
+    }
+    if prototypes_only {
+        assessments.retain(|a| a.verdict == Verdict::Prototype);
+    }
+
+    assessments.sort_by(|a, b| b.size.cmp(&a.size));
+
+    if as_json {
+        let json = serde_json::to_string_pretty(&assessments)?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    if assessments.is_empty() {
+        println!("{}", "No repos match the filter.".yellow());
+        return Ok(());
+    }
+
+    print_verdict_histogram(&assessments);
+
+    println!();
+    println!("{}", "Per-repo verdicts".bold().underline());
+    for a in &assessments {
+        print_row(a);
+    }
+
+    println!();
+    println!("{}", "Next actions".bold().underline());
+    print_next_actions(&assessments);
+
+    Ok(())
 }
 
-pub fn default_projects_path() -> PathBuf {
-    dirs_home().join("projects")
+fn parse_verdict(s: &str) -> Option<Verdict> {
+    match s.to_lowercase().as_str() {
+        "archive" => Some(Verdict::Archive),
+        "prototype" => Some(Verdict::Prototype),
+        "worktree" => Some(Verdict::Worktree),
+        "local" | "local-work" => Some(Verdict::HasLocalWork),
+        "keep" => Some(Verdict::KeepAsIs),
+        "no-remote" | "noremote" => Some(Verdict::NoRemote),
+        _ => None,
+    }
 }
 
-pub fn dirs_home() -> PathBuf {
-    std::env::var("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+fn print_verdict_histogram(assessments: &[Assessment]) {
+    let mut counts = std::collections::BTreeMap::new();
+    let mut sizes = std::collections::BTreeMap::new();
+    for a in assessments {
+        let key = match a.verdict {
+            Verdict::Archive => "archive",
+            Verdict::Prototype => "prototype",
+            Verdict::Worktree => "worktree",
+            Verdict::HasLocalWork => "local-work",
+            Verdict::KeepAsIs => "keep",
+            Verdict::NoRemote => "no-remote",
+        };
+        *counts.entry(key).or_insert(0u64) += 1;
+        *sizes.entry(key).or_insert(0u64) += a.size;
+    }
+    println!();
+    println!("{}", "Verdict summary".bold().underline());
+    for (k, c) in &counts {
+        let s = sizes.get(k).copied().unwrap_or(0);
+        println!("  {:<12} {:>4}  {}", k, c, format_size(s).dimmed());
+    }
 }
 
-pub fn reap_archives_dir() -> PathBuf {
-    dirs_home().join(".reap/archives")
+fn print_row(a: &Assessment) {
+    let date_str = a
+        .last_commit
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!(
+        "  [{}] {} ({}, last commit {}, {} commits)",
+        a.verdict.label(),
+        a.path.display(),
+        format_size(a.size),
+        date_str.dimmed(),
+        a.commit_count
+    );
+}
+
+fn print_next_actions(assessments: &[Assessment]) {
+    let archive_count = assessments.iter().filter(|a| a.verdict == Verdict::Archive).count();
+    let proto_count = assessments.iter().filter(|a| a.verdict == Verdict::Prototype).count();
+    let noremote_count = assessments.iter().filter(|a| a.verdict == Verdict::NoRemote).count();
+
+    if archive_count > 0 {
+        println!(
+            "  {} stale repos ready for bundle archive, run {}",
+            archive_count,
+            "ward archive --execute".bold()
+        );
+    }
+    if proto_count > 0 {
+        println!(
+            "  {} prototype repos detected, run {}",
+            proto_count,
+            "ward archive --prototypes --execute".bold()
+        );
+    }
+    if noremote_count > 0 {
+        println!(
+            "  {} repos without a remote, run {} to see them",
+            noremote_count,
+            "ward scan --verdict no-remote".bold()
+        );
+    }
+    if archive_count == 0 && proto_count == 0 {
+        println!("  {}", "Workspace is clean. Nothing to reclaim.".green());
+    }
 }

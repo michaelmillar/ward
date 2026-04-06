@@ -1,9 +1,14 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use colored::Colorize;
+use rayon::prelude::*;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-use crate::scan::{dir_size, find_git_repos, format_size, last_commit_date};
+use crate::assess::{Assessment, Verdict, assess_repo};
+use crate::cache::Cache;
+use crate::config::Config;
+use crate::git;
+use crate::util::{default_projects_path, dir_size, format_size};
 
 const ARTIFACT_DIRS: &[&str] = &[
     "target",
@@ -13,96 +18,201 @@ const ARTIFACT_DIRS: &[&str] = &[
     "__pycache__",
     ".gradle",
     "build",
+    ".turbo",
+    ".vite",
+    ".parcel-cache",
+    ".swc",
+    ".pnpm-store",
+    ".venv",
+    "venv",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".tox",
+    ".nox",
+    "zig-cache",
+    "zig-out",
+    ".dart_tool",
+    "DerivedData",
 ];
 
-pub fn run(path: Option<PathBuf>) -> Result<()> {
-    let root = path.unwrap_or_else(crate::scan::default_projects_path);
+pub fn run(path: Option<PathBuf>, no_cache: bool, as_json: bool) -> Result<()> {
+    let cfg = Config::load();
+    let root = path
+        .or_else(|| cfg.workspace_root())
+        .unwrap_or_else(default_projects_path);
     if !root.exists() {
-        anyhow::bail!("Path does not exist: {}", root.display());
+        bail!("Path does not exist: {}", root.display());
     }
 
-    println!(
-        "{}",
-        format!("Analysing {} ...", root.display()).dimmed()
-    );
+    if !as_json {
+        println!("{}", format!("Analysing {} ...", root.display()).dimmed());
+    }
 
     let total_size = dir_size(&root);
-    let repos = find_git_repos(&root);
+    let repos = git::find_git_repos(&root);
     let repo_count = repos.len();
 
     let mut artifact_size = 0u64;
-    let mut skip_prefixes: Vec<PathBuf> = Vec::new();
-    let walker = WalkDir::new(&root).into_iter();
-    for entry in walker.filter_entry(|e| {
-        if !e.file_type().is_dir() {
-            return true;
-        }
-        let name = e.file_name().to_string_lossy();
-        if name.starts_with('.') && e.depth() > 0 && name != ".next" && name != ".gradle" {
-            return false;
-        }
-        true
-    }) {
-        let Ok(entry) = entry else { continue };
+    let mut it = WalkDir::new(&root).into_iter();
+    loop {
+        let entry = match it.next() {
+            None => break,
+            Some(Err(_)) => continue,
+            Some(Ok(e)) => e,
+        };
         if !entry.file_type().is_dir() {
             continue;
         }
-        if skip_prefixes.iter().any(|p| entry.path().starts_with(p)) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if ARTIFACT_DIRS.contains(&name.as_str()) {
+            artifact_size += dir_size(entry.path());
+            it.skip_current_dir();
             continue;
         }
-        let name = entry.file_name().to_string_lossy();
-        if ARTIFACT_DIRS.contains(&name.as_ref()) {
-            artifact_size += dir_size(entry.path());
-            skip_prefixes.push(entry.path().to_path_buf());
+        if name.starts_with('.') && entry.depth() > 0 {
+            it.skip_current_dir();
         }
     }
 
     let source_size = total_size.saturating_sub(artifact_size);
 
-    println!();
-    println!("{}", "Disk Usage Overview".bold().underline());
-    println!("  Total:              {}", format_size(total_size).bold());
-    println!(
-        "  Build artefacts:    {} ({}%)",
-        format_size(artifact_size).red(),
-        if total_size > 0 {
-            artifact_size * 100 / total_size
-        } else {
-            0
-        }
-    );
-    println!(
-        "  Source and other:    {} ({}%)",
-        format_size(source_size).green(),
-        if total_size > 0 {
-            source_size * 100 / total_size
-        } else {
-            0
-        }
-    );
-    println!("  Git repositories:   {}", repo_count);
-
-    if !repos.is_empty() {
-        let mut stale: Vec<(PathBuf, chrono::NaiveDate)> = repos
-            .iter()
-            .filter_map(|r| last_commit_date(r).map(|d| (r.clone(), d)))
-            .collect();
-        stale.sort_by(|a, b| a.1.cmp(&b.1));
-
-        let show_count = stale.len().min(5);
-        if show_count > 0 {
-            println!();
-            println!("{}", "Stalest Repositories".bold().underline());
-            for (path, date) in stale.iter().take(show_count) {
-                let size = dir_size(path);
-                println!(
-                    "  {} ({}, last commit: {})",
-                    path.display(),
-                    format_size(size),
-                    date.to_string().yellow()
-                );
+    if !as_json {
+        println!();
+        println!("{}", "Disk Usage".bold().underline());
+        println!("  Total              {}", format_size(total_size).bold());
+        println!(
+            "  Build artefacts    {} ({}%)",
+            format_size(artifact_size).red(),
+            if total_size > 0 {
+                artifact_size * 100 / total_size
+            } else {
+                0
             }
+        );
+        println!(
+            "  Source and other   {} ({}%)",
+            format_size(source_size).green(),
+            if total_size > 0 {
+                source_size * 100 / total_size
+            } else {
+                0
+            }
+        );
+        println!("  Git repositories   {}", repo_count);
+    }
+
+    if repos.is_empty() {
+        if as_json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "total_size": total_size,
+                    "artifact_size": artifact_size,
+                    "source_size": source_size,
+                    "repo_count": repo_count,
+                    "assessments": []
+                })
+            );
         }
+        return Ok(());
+    }
+
+    let mut cache = if no_cache { Cache::default() } else { Cache::load() };
+    let thresholds = cfg.thresholds.clone();
+    let assessments: Vec<Assessment> = repos
+        .par_iter()
+        .filter(|r| !cfg.is_excluded(r))
+        .filter_map(|r| {
+            if !no_cache {
+                if let Some(a) = cache.lookup(r) {
+                    return Some(a.clone());
+                }
+            }
+            assess_repo(r, &thresholds).ok()
+        })
+        .collect();
+
+    if !no_cache {
+        for a in &assessments {
+            cache.store(&a.path, a.clone());
+        }
+        let _ = cache.save();
+    }
+
+    if as_json {
+        #[derive(serde::Serialize)]
+        struct StatusReport<'a> {
+            total_size: u64,
+            artifact_size: u64,
+            source_size: u64,
+            repo_count: usize,
+            assessments: &'a [Assessment],
+        }
+        let report = StatusReport {
+            total_size,
+            artifact_size,
+            source_size,
+            repo_count,
+            assessments: &assessments,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    let mut counts = std::collections::BTreeMap::new();
+    let mut sizes = std::collections::BTreeMap::new();
+    for a in &assessments {
+        let k = match a.verdict {
+            Verdict::Archive => "archive",
+            Verdict::Prototype => "prototype",
+            Verdict::Worktree => "worktree",
+            Verdict::HasLocalWork => "local-work",
+            Verdict::KeepAsIs => "keep",
+            Verdict::NoRemote => "no-remote",
+        };
+        *counts.entry(k).or_insert(0u64) += 1;
+        *sizes.entry(k).or_insert(0u64) += a.size;
+    }
+
+    println!();
+    println!("{}", "Lifecycle".bold().underline());
+    for (k, c) in &counts {
+        let s = sizes.get(k).copied().unwrap_or(0);
+        println!("  {:<12} {:>4}  {}", k, c, format_size(s).dimmed());
+    }
+
+    let mut stale: Vec<(PathBuf, chrono::NaiveDate, u64)> = assessments
+        .iter()
+        .filter_map(|a| a.last_commit.map(|d| (a.path.clone(), d, a.size)))
+        .collect();
+    stale.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let show_count = stale.len().min(5);
+    if show_count > 0 {
+        println!();
+        println!("{}", "Stalest repositories".bold().underline());
+        for (path, date, size) in stale.iter().take(show_count) {
+            println!(
+                "  {} ({}, last commit {})",
+                path.display(),
+                format_size(*size),
+                date.to_string().yellow()
+            );
+        }
+    }
+
+    let archivable = assessments
+        .iter()
+        .filter(|a| a.verdict == Verdict::Archive || a.verdict == Verdict::Prototype)
+        .count();
+    if archivable > 0 {
+        println!();
+        println!(
+            "  {} repo(s) ready for {}",
+            archivable,
+            "ward archive".bold()
+        );
     }
 
     Ok(())

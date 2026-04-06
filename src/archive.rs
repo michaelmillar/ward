@@ -1,326 +1,320 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use colored::Colorize;
-use flate2::write::GzEncoder;
-use flate2::read::GzDecoder;
 use flate2::Compression;
-use serde::{Deserialize, Serialize};
+use flate2::write::GzEncoder;
+use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::scan::{
-    all_branches_pushed, dir_size, find_git_repos, format_size, has_uncommitted_changes,
-    last_commit_date, reap_archives_dir,
-};
+use crate::assess::{Assessment, Verdict, assess_repo, print_safety_proof};
+use crate::bundle;
+use crate::cache::Cache;
+use crate::config::Config;
+use crate::git;
+use crate::manifest::{self, ArchiveFormat, MANIFEST_VERSION, Manifest, RefEntry, RemoteEntry};
+use crate::util::{archives_dir, default_projects_path, format_size};
 
-#[derive(Serialize, Deserialize)]
-struct ArchiveManifest {
-    original_path: String,
-    archived_at: String,
-    last_commit: Option<String>,
-    size_bytes: u64,
-}
+const VERIFIER_VERSION: &str = concat!("ward ", env!("CARGO_PKG_VERSION"));
 
-struct RepoAssessment {
-    path: PathBuf,
-    size: u64,
-    last_commit: Option<chrono::NaiveDate>,
-    all_pushed: bool,
-    dirty: bool,
-    pm_status: Option<String>,
-    safe_to_archive: bool,
-}
-
-fn check_pm_status(repo_path: &Path) -> Option<String> {
-    let db_path = crate::scan::dirs_home().join(".local/share/pm/projects.db");
-    if !db_path.exists() {
-        return None;
-    }
-    let conn = rusqlite::Connection::open(&db_path).ok()?;
-    let repo_name = repo_path.file_name()?.to_string_lossy().to_string();
-    conn.query_row(
-        "SELECT status FROM projects WHERE name = ?1",
-        [&repo_name],
-        |row| row.get::<_, String>(0),
-    )
-    .ok()
-}
-
-pub fn run(path: Option<PathBuf>, execute: bool) -> Result<()> {
-    let root = path.unwrap_or_else(crate::scan::default_projects_path);
+pub fn run(
+    path: Option<PathBuf>,
+    execute: bool,
+    include_prototypes: bool,
+    include_no_remote: bool,
+    no_cache: bool,
+    as_json: bool,
+) -> Result<()> {
+    let cfg = Config::load();
+    let root = path
+        .or_else(|| cfg.workspace_root())
+        .unwrap_or_else(default_projects_path);
     if !root.exists() {
-        anyhow::bail!("Path does not exist: {}", root.display());
+        bail!("Path does not exist: {}", root.display());
     }
 
-    println!(
-        "{}",
-        format!("Scanning {} for archivable repos...", root.display()).dimmed()
-    );
+    if !as_json {
+        println!(
+            "{}",
+            format!("Assessing git repos under {} ...", root.display()).dimmed()
+        );
+    }
 
-    let repos = find_git_repos(&root);
-    let mut assessments = Vec::new();
+    let repos: Vec<_> = git::find_git_repos(&root)
+        .into_iter()
+        .filter(|r| !cfg.is_excluded(r))
+        .collect();
+    if repos.is_empty() {
+        if !as_json {
+            println!("{}", "No git repos found.".yellow());
+        } else {
+            println!("[]");
+        }
+        return Ok(());
+    }
 
-    for repo in repos {
-        let size = dir_size(&repo);
-        let last_commit = last_commit_date(&repo);
-        let all_pushed = all_branches_pushed(&repo).unwrap_or(false);
-        let dirty = has_uncommitted_changes(&repo).unwrap_or(true);
-        let pm_status = check_pm_status(&repo);
+    let mut cache = if no_cache { Cache::default() } else { Cache::load() };
+    let thresholds = cfg.thresholds.clone();
 
-        let safe = all_pushed && !dirty;
+    let mut assessments: Vec<Assessment> = repos
+        .par_iter()
+        .filter_map(|r| {
+            if !no_cache {
+                if let Some(a) = cache.lookup(r) {
+                    return Some(a.clone());
+                }
+            }
+            assess_repo(r, &thresholds).ok()
+        })
+        .collect();
 
-        assessments.push(RepoAssessment {
-            path: repo,
-            size,
-            last_commit,
-            all_pushed,
-            dirty,
-            pm_status,
-            safe_to_archive: safe,
-        });
+    if !no_cache {
+        for a in &assessments {
+            cache.store(&a.path, a.clone());
+        }
+        let _ = cache.save();
     }
 
     assessments.sort_by(|a, b| a.last_commit.cmp(&b.last_commit));
 
-    if assessments.is_empty() {
-        println!("{}", "No git repos found.".yellow());
+    let eligible: Vec<&Assessment> = assessments
+        .iter()
+        .filter(|a| match a.verdict {
+            Verdict::Archive => true,
+            Verdict::Prototype => include_prototypes,
+            Verdict::NoRemote => include_no_remote,
+            _ => false,
+        })
+        .collect();
+
+    if as_json {
+        let payload: Vec<&Assessment> = eligible.iter().copied().collect();
+        let json = serde_json::to_string_pretty(&payload)?;
+        println!("{json}");
         return Ok(());
     }
 
-    for assessment in &assessments {
-        let date_str = assessment
-            .last_commit
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+    print_summary(&assessments, &eligible);
 
-        let status_indicator = if assessment.safe_to_archive {
-            "SAFE".green().bold()
-        } else {
-            "SKIP".red().bold()
-        };
+    if eligible.is_empty() {
+        println!("{}", "Nothing to archive.".yellow());
+        return Ok(());
+    }
 
+    for a in &eligible {
+        print_candidate(a);
+    }
+
+    let total_size: u64 = eligible.iter().map(|a| a.size).sum();
+    println!();
+    println!(
+        "{} repo(s) eligible for archive ({})",
+        eligible.len(),
+        format_size(total_size).bold()
+    );
+
+    if !execute {
+        println!();
         println!(
-            "  [{}] {} ({})",
-            status_indicator,
-            assessment.path.display(),
-            format_size(assessment.size),
+            "{}",
+            "Dry run. Use --execute to archive these repos.".yellow()
         );
+        return Ok(());
+    }
 
-        println!(
-            "        Last commit: {} | Pushed: {} | Clean: {}",
-            date_str.dimmed(),
-            if assessment.all_pushed {
-                "yes".green()
-            } else {
-                "no".red()
-            },
-            if !assessment.dirty {
-                "yes".green()
-            } else {
-                "no".red()
-            },
-        );
+    let archive_dir = archives_dir();
+    fs::create_dir_all(&archive_dir)?;
 
-        if let Some(ref status) = assessment.pm_status {
-            println!("        PM status: {}", status.cyan());
+    let mut freed = 0u64;
+    let mut failures = 0u64;
+    for a in &eligible {
+        match archive_one(a, &archive_dir) {
+            Ok(()) => freed += a.size,
+            Err(e) => {
+                failures += 1;
+                eprintln!(
+                    "  {} Failed to archive {} ({})",
+                    "error".red().bold(),
+                    a.path.display(),
+                    e
+                );
+            }
         }
     }
 
-    let safe_count = assessments.iter().filter(|a| a.safe_to_archive).count();
-    let safe_size: u64 = assessments
-        .iter()
-        .filter(|a| a.safe_to_archive)
-        .map(|a| a.size)
-        .sum();
-
     println!();
     println!(
-        "{} repo(s) safe to archive ({})",
-        safe_count,
-        format_size(safe_size).bold()
+        "Archived {} repo(s), {} reclaimed",
+        eligible.len() - failures as usize,
+        format_size(freed).green().bold()
     );
-
-    if execute {
-        let archive_dir = reap_archives_dir();
-        fs::create_dir_all(&archive_dir)?;
-
-        for assessment in assessments.iter().filter(|a| a.safe_to_archive) {
-            let repo_name = assessment
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
-
-            let archive_name = format!(
-                "{}-{}.tar.gz",
-                repo_name,
-                Utc::now().format("%Y%m%d%H%M%S")
-            );
-            let archive_path = archive_dir.join(&archive_name);
-            let manifest_path = archive_dir.join(format!("{archive_name}.json"));
-
-            println!("  Archiving {} ...", assessment.path.display());
-
-            match create_archive(&assessment.path, &archive_path) {
-                Ok(()) => {
-                    let manifest = ArchiveManifest {
-                        original_path: assessment.path.display().to_string(),
-                        archived_at: Utc::now().to_rfc3339(),
-                        last_commit: assessment.last_commit.map(|d| d.to_string()),
-                        size_bytes: assessment.size,
-                    };
-                    let json = serde_json::to_string_pretty(&manifest)?;
-                    fs::write(&manifest_path, json)?;
-
-                    fs::remove_dir_all(&assessment.path)?;
-                    println!(
-                        "    {} Archived to {}",
-                        "Done".green(),
-                        archive_path.display()
-                    );
-                }
-                Err(e) => {
-                    eprintln!(
-                        "    {} Failed to archive {} ({})",
-                        "Error".red().bold(),
-                        assessment.path.display(),
-                        e
-                    );
-                }
-            }
-        }
-    } else if safe_count > 0 {
-        println!(
-            "{}",
-            "Dry run. Use --execute to archive safe repos.".yellow()
-        );
+    if failures > 0 {
+        println!("{} failure(s)", failures.to_string().red().bold());
     }
 
     Ok(())
 }
 
-fn create_archive(source: &Path, dest: &Path) -> Result<()> {
-    let file = fs::File::create(dest).context("Failed to create archive file")?;
-    let encoder = GzEncoder::new(file, Compression::default());
-    let mut archive = tar::Builder::new(encoder);
-    let dir_name = source
+fn print_summary(all: &[Assessment], eligible: &[&Assessment]) {
+    let mut counts = std::collections::BTreeMap::new();
+    for a in all {
+        *counts.entry(verdict_key(a.verdict)).or_insert(0u64) += 1;
+    }
+    println!();
+    println!("{}", "Verdict summary".bold().underline());
+    for (k, v) in &counts {
+        println!("  {:<12} {}", k, v);
+    }
+    println!("  {:<12} {}", "eligible", eligible.len());
+    println!();
+}
+
+fn verdict_key(v: Verdict) -> &'static str {
+    match v {
+        Verdict::Archive => "archive",
+        Verdict::Prototype => "prototype",
+        Verdict::Worktree => "worktree",
+        Verdict::HasLocalWork => "local-work",
+        Verdict::KeepAsIs => "keep",
+        Verdict::NoRemote => "no-remote",
+    }
+}
+
+fn print_candidate(a: &Assessment) {
+    let date_str = a
+        .last_commit
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    println!(
+        "  [{}] {} ({}, last commit {})",
+        a.verdict.label(),
+        a.path.display(),
+        format_size(a.size),
+        date_str.dimmed()
+    );
+    print_safety_proof(a);
+    println!();
+}
+
+fn archive_one(a: &Assessment, archive_dir: &Path) -> Result<()> {
+    let repo_name = a
+        .path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "repo".to_string());
-    archive
-        .append_dir_all(&dir_name, source)
-        .context("Failed to add directory to archive")?;
-    archive.finish().context("Failed to finalise archive")?;
+    let stamp = Utc::now().format("%Y%m%d%H%M%S").to_string();
+    let stem = format!("{repo_name}-{stamp}");
+    let bundle_path = archive_dir.join(format!("{stem}.bundle"));
+    let untracked_path = archive_dir.join(format!("{stem}.untracked.tar.gz"));
+    let manifest_path = archive_dir.join(format!("{stem}.json"));
+
+    println!("  Bundling {} ...", a.path.display());
+    bundle::create(&a.path, &bundle_path).with_context(|| "git bundle create")?;
+    bundle::verify(&bundle_path).with_context(|| "git bundle verify")?;
+    let bundle_sha = bundle::sha256_file(&bundle_path)?;
+
+    let untracked_sha = if a.untracked > 0 {
+        println!("    capturing {} untracked file(s)", a.untracked);
+        create_untracked_tar(&a.path, &untracked_path)?;
+        Some(bundle::sha256_file(&untracked_path)?)
+    } else {
+        None
+    };
+
+    println!("    verifying by clone ...");
+    let verified = bundle::verify_by_clone(&bundle_path)?;
+    compare_refs(a, &verified)?;
+
+    let refs: Vec<RefEntry> = verified
+        .refs
+        .iter()
+        .map(|(n, s)| RefEntry {
+            name: n.clone(),
+            sha: s.clone(),
+        })
+        .collect();
+
+    let remotes: Vec<RemoteEntry> = a
+        .remotes
+        .iter()
+        .map(|(n, u)| RemoteEntry {
+            name: n.clone(),
+            url: u.clone(),
+        })
+        .collect();
+
+    let manifest = Manifest {
+        manifest_version: MANIFEST_VERSION,
+        format: ArchiveFormat::Bundle,
+        original_path: a.path.display().to_string(),
+        archived_at: Utc::now().to_rfc3339(),
+        archived_by: VERIFIER_VERSION.to_string(),
+        size_bytes: a.size,
+        bundle_sha256: Some(bundle_sha),
+        untracked_sha256: untracked_sha,
+        head_sha: a.head_sha.clone(),
+        refs,
+        remotes,
+        first_commit: a.first_commit.map(|d| d.to_string()),
+        last_commit: a.last_commit.map(|d| d.to_string()),
+        commit_count: a.commit_count,
+        verified_at: Some(Utc::now().to_rfc3339()),
+        verifier_version: Some(VERIFIER_VERSION.to_string()),
+        has_untracked: a.untracked > 0,
+        stash_count: a.stash_count,
+        tag_count: a.tag_count,
+    };
+
+    manifest::write(&manifest, &manifest_path)?;
+
+    fs::remove_dir_all(&a.path)
+        .with_context(|| format!("Failed to remove {}", a.path.display()))?;
+
+    println!(
+        "    {} archived {} ({})",
+        "ok".green().bold(),
+        bundle_path.display(),
+        format_size(fs::metadata(&bundle_path)?.len())
+    );
     Ok(())
 }
 
-pub fn restore(name: Option<String>) -> Result<()> {
-    let archive_dir = reap_archives_dir();
-    if !archive_dir.exists() {
-        println!("{}", "No archives directory found.".yellow());
-        return Ok(());
-    }
-
-    if let Some(name) = name {
-        return restore_archive(&archive_dir, &name);
-    }
-
-    let mut entries: Vec<(String, ArchiveManifest)> = Vec::new();
-
-    for entry in fs::read_dir(&archive_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "json") {
-            let content = fs::read_to_string(&path)?;
-            if let Ok(manifest) = serde_json::from_str::<ArchiveManifest>(&content) {
-                let archive_name = path
-                    .file_stem()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                entries.push((archive_name, manifest));
+fn compare_refs(a: &Assessment, verified: &bundle::VerifiedRefs) -> Result<()> {
+    if let Some(head) = &a.head_sha {
+        if let Some(vhead) = &verified.head {
+            if head != vhead {
+                bail!("HEAD mismatch after bundle verification");
             }
         }
     }
-
-    if entries.is_empty() {
-        println!("{}", "No archives found.".yellow());
-        return Ok(());
+    if verified.refs.is_empty() {
+        bail!("Verification clone contains no refs");
     }
-
-    entries.sort_by(|a, b| a.1.archived_at.cmp(&b.1.archived_at));
-
-    println!("{}", "Archives:".bold());
-    for (name, manifest) in &entries {
-        println!(
-            "  {} (from {}, archived {}, {})",
-            name.cyan(),
-            manifest.original_path,
-            manifest.archived_at.dimmed(),
-            format_size(manifest.size_bytes),
-        );
-    }
-    println!();
-    println!("Use {} to restore an archive.", "reap restore <name>".bold());
-
     Ok(())
 }
 
-fn restore_archive(archive_dir: &Path, name: &str) -> Result<()> {
-    let archive_path = if name.ends_with(".tar.gz") {
-        archive_dir.join(name)
-    } else {
-        archive_dir.join(format!("{name}.tar.gz"))
-    };
+fn create_untracked_tar(repo: &Path, dest: &Path) -> Result<()> {
+    let file = fs::File::create(dest)?;
+    let encoder = GzEncoder::new(file, Compression::default());
+    let mut archive = tar::Builder::new(encoder);
 
-    let manifest_path = if name.ends_with(".tar.gz") {
-        archive_dir.join(format!("{name}.json"))
-    } else {
-        archive_dir.join(format!("{name}.tar.gz.json"))
-    };
-
-    if !archive_path.exists() {
-        anyhow::bail!("Archive not found: {}", archive_path.display());
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(repo)
+        .output()?;
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    for line in text.lines() {
+        let rel = line.trim();
+        if rel.is_empty() {
+            continue;
+        }
+        let full = repo.join(rel);
+        if full.is_file() {
+            let mut f = fs::File::open(&full)?;
+            archive.append_file(rel, &mut f)?;
+        }
     }
-
-    let original_path = if manifest_path.exists() {
-        let content = fs::read_to_string(&manifest_path)?;
-        let manifest: ArchiveManifest = serde_json::from_str(&content)?;
-        PathBuf::from(&manifest.original_path)
-    } else {
-        anyhow::bail!(
-            "Manifest not found for archive: {}",
-            archive_path.display()
-        );
-    };
-
-    if original_path.exists() {
-        anyhow::bail!(
-            "Target path already exists: {}. Remove it first.",
-            original_path.display()
-        );
-    }
-
-    let parent = original_path
-        .parent()
-        .context("Could not determine parent directory")?;
-    fs::create_dir_all(parent)?;
-
-    println!(
-        "Restoring {} to {} ...",
-        archive_path.display(),
-        original_path.display()
-    );
-
-    let file = fs::File::open(&archive_path)?;
-    let decoder = GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
-    archive.unpack(parent)?;
-
-    fs::remove_file(&archive_path)?;
-    if manifest_path.exists() {
-        fs::remove_file(&manifest_path)?;
-    }
-
-    println!("{} Restored to {}", "Done".green(), original_path.display());
+    archive.finish()?;
     Ok(())
 }
+
