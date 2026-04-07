@@ -225,7 +225,8 @@ fn archive_one(a: &Assessment, archive_dir: &Path) -> Result<()> {
 
     let hooks = git::custom_hooks(&a.path);
     let has_config = a.path.join(".git/config").exists();
-    let has_extras = a.untracked > 0 || !hooks.is_empty() || has_config;
+    let has_config_worktree = git::has_worktree_config(&a.path);
+    let has_extras = a.untracked > 0 || !hooks.is_empty() || has_config || has_config_worktree;
 
     let extras_sha = if has_extras {
         let mut parts = Vec::new();
@@ -238,8 +239,11 @@ fn archive_one(a: &Assessment, archive_dir: &Path) -> Result<()> {
         if has_config {
             parts.push("config".to_string());
         }
+        if has_config_worktree {
+            parts.push("config.worktree".to_string());
+        }
         println!("    capturing extras [{}]", parts.join(", "));
-        create_extras_tar(&a.path, &extras_path, &hooks, has_config)?;
+        create_extras_tar(&a.path, &extras_path, &hooks, has_config, has_config_worktree)?;
         Some(bundle::sha256_file(&extras_path)?)
     } else {
         None
@@ -296,6 +300,7 @@ fn archive_one(a: &Assessment, archive_dir: &Path) -> Result<()> {
         tag_count: a.tag_count,
         has_hooks: !hooks.is_empty(),
         has_config,
+        has_config_worktree,
         submodule_count: a.submodule_count,
     };
 
@@ -332,6 +337,7 @@ fn create_extras_tar(
     dest: &Path,
     hooks: &[PathBuf],
     include_config: bool,
+    include_config_worktree: bool,
 ) -> Result<()> {
     let file = fs::File::create(dest)?;
     let encoder = GzEncoder::new(file, Compression::default());
@@ -359,6 +365,14 @@ fn create_extras_tar(
         if config_path.is_file() {
             let mut f = fs::File::open(&config_path)?;
             archive.append_file(".ward-extras/config", &mut f)?;
+        }
+    }
+
+    if include_config_worktree {
+        let wt_path = repo.join(".git/config.worktree");
+        if wt_path.is_file() {
+            let mut f = fs::File::open(&wt_path)?;
+            archive.append_file(".ward-extras/config.worktree", &mut f)?;
         }
     }
 

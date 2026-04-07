@@ -29,6 +29,8 @@ pub struct Manifest {
     pub tag_count: u64,
     pub has_hooks: bool,
     pub has_config: bool,
+    #[serde(default)]
+    pub has_config_worktree: bool,
     pub submodule_count: u64,
 }
 

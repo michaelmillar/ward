@@ -397,8 +397,40 @@ pub fn submodule_count(repo: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+pub fn has_worktree_config(repo: &Path) -> bool {
+    repo.join(".git/config.worktree").exists()
+}
+
+pub fn effective_hooks_path(repo: &Path) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["config", "--get", "core.hooksPath"])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if output.status.success() {
+        let p = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if p.is_empty() {
+            return None;
+        }
+        let path = if let Some(rest) = p.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                PathBuf::from(format!("{home}/{rest}"))
+            } else {
+                PathBuf::from(&p)
+            }
+        } else {
+            PathBuf::from(&p)
+        };
+        if path.is_dir() {
+            return Some(path);
+        }
+    }
+    None
+}
+
 pub fn custom_hooks(repo: &Path) -> Vec<PathBuf> {
-    let hooks_dir = repo.join(".git/hooks");
+    let hooks_dir = effective_hooks_path(repo)
+        .unwrap_or_else(|| repo.join(".git/hooks"));
     if !hooks_dir.is_dir() {
         return Vec::new();
     }

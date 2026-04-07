@@ -174,6 +174,9 @@ fn verify_archive(dir: &Path, name: &str) -> Result<()> {
     if m.has_config {
         println!("  {} per-repo config preserved in extras", "ok".green().bold());
     }
+    if m.has_config_worktree {
+        println!("  {} worktree config preserved in extras", "ok".green().bold());
+    }
 
     println!(
         "{}",
@@ -272,6 +275,11 @@ fn extract_extras(tar_path: &Path, target: &Path) -> Result<()> {
         if config_src.is_file() {
             let config_dst = target.join(".git/config");
             let _ = fs::copy(&config_src, &config_dst);
+        }
+        let wt_config_src = ward_extras.join("config.worktree");
+        if wt_config_src.is_file() {
+            let wt_config_dst = target.join(".git/config.worktree");
+            let _ = fs::copy(&wt_config_src, &wt_config_dst);
         }
         let hooks_src = ward_extras.join("hooks");
         if hooks_src.is_dir() {
