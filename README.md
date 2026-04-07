@@ -2,11 +2,12 @@
   <img src="assets/logo.svg" width="200" alt="ward">
 </p>
 
-<h3 align="center">Reclaim developer disk space with proof-before-delete Git archival</h3>
+<h3 align="center">Archive stale Git repos only after a verified restore rehearsal</h3>
 
 <p align="center">
-  Archive stale repos as Git bundles, verify by fresh clone, inspect pushed status and local state, then delete only when the evidence supports it.<br>
-  Preserves refs, commit history, stashes, hooks, per-repo config, and untracked files.
+  Classify local repositories by lifecycle stage. Build an archive package
+  around a Git bundle plus captured local state. Rehearse restore in a
+  temporary directory. Verify refs and metadata. Only then permit deletion.
 </p>
 
 ---
@@ -60,30 +61,34 @@ $ ward archive ~/projects --execute
 
 Existing tools mostly clean build artefacts or caches. Ward answers a different question. *"Which local git repositories can I archive and remove with evidence, and can I verify the archive before deletion?"*
 
-| Tool              | Bundle-based archive | Verify-by-clone | Full state capture | Safety proofs | Prototype triage |
-|-------------------|----------------------|-----------------|--------------------|---------------|------------------|
-| `du` / `ncdu`     | No                   | No              | No                 | No            | No               |
-| `npkill`          | No                   | No              | No                 | No            | No               |
-| `cargo-sweep`     | No                   | No              | No                 | No            | No               |
-| `devclean`        | No                   | No              | No                 | No            | No               |
-| `git bundle`      | Yes (primitive)      | No              | Refs only          | No            | No               |
-| **`ward`**        | **Yes**              | **Yes**         | **Yes**            | **Yes**       | **Yes**          |
+| Tool              | Archive repos | Verify-by-clone | Capture stashes/hooks/config | Safety proofs | Lifecycle triage |
+|-------------------|---------------|-----------------|------------------------------|---------------|------------------|
+| `du` / `ncdu`     | No            | No              | No                           | No            | No               |
+| `npkill`          | No            | No              | No                           | No            | No               |
+| `cargo-sweep`     | No            | No              | No                           | No            | No               |
+| `devclean`        | No            | No              | No                           | No            | No               |
+| `git-workspace`   | Moves to dir  | No              | No                           | No            | No               |
+| `git bundle`      | Yes (manual)  | No              | Refs only                    | No            | No               |
+| **`ward`**        | **Yes**       | **Yes**         | **Yes (bundle + extras tar)**| **Yes**       | **Yes**          |
 
-Among the developer workspace cleanup tools reviewed, none performs a clone-verified Git archive check before deleting the source.
+`git-workspace` manages a local workspace as a collection of repositories and can move deleted repos into an archive directory, but does not verify archives before deletion or capture local state beyond the Git graph. Among the tools reviewed, ward is the only one that combines lifecycle classification, clone-verified archival, and lossless local-state capture in a single workflow.
 
-**Strengths.** Bundle-based archival preserves refs and commit history. Companion extras tar preserves stashes (via temporary refs), hooks, per-repo config, and untracked files. Safety proofs show remote reachability, per-branch pushed status, stash count, local-only refs, submodule status, and untracked file count **before** any destructive action. Worktree planner converts duplicate clones of the same remote into git worktrees. Prototype triage surfaces throwaway experiments (low commit count, short lifetime, single author) as candidates for review, not automatic deletion.
+**Strengths.** Archive package centred on a Git bundle for refs and reachable commits, with stashes promoted to temporary refs so they survive bundling. Companion extras tar captures hooks (including `core.hooksPath` externals), per-repo config (`.git/config` and `config.worktree`), and untracked files. Both artefacts are SHA256-hashed and the bundle is clone-verified before the source is removed. Safety proofs show remote reachability, per-branch pushed status, stash count, local-only refs, submodule status, and untracked file count before any destructive action. Worktree planner converts duplicate clones of the same remote into git worktrees. Prototype triage surfaces throwaway experiments as candidates for review, not automatic deletion.
 
 **Weaknesses.** No interactive TUI, keyboard-first stays in scope for a later release. No cloud backend for bundles, archives live at `~/.ward/archives/` only. Worktree conversion is experimental, it pushes local-only branches to the keeper's origin first, so offline-only branches require manual review.
 
 ## Install
 
-Build from source.
+```
+cargo install ward
+```
+
+Or build from source:
 
 ```
-git clone git@github.com:michaelmillar/ward.git
+git clone https://github.com/michaelmillar/ward.git
 cd ward
-cargo build --release
-ln -s $(pwd)/target/release/ward ~/.local/bin/ward
+cargo install --path .
 ```
 
 ## Quick start
@@ -155,7 +160,7 @@ For each archive:
 2. Runs `git bundle verify` on the resulting file
 3. Clones the bundle into a temp directory and compares refs to source
 4. Writes `<name>-<timestamp>.json` manifest with SHA256, HEAD, all refs, remotes, commit count, and verification timestamp
-5. Captures untracked-not-ignored files to a companion `.untracked.tar.gz` if any
+5. Captures extras (untracked files, hooks, `.git/config`, `config.worktree`) to a companion `.extras.tar.gz`, verifies contents
 6. Only then removes the original directory
 
 ```
@@ -265,7 +270,7 @@ A ward archive is not just a Git bundle. It is three artefacts.
 | Artefact | Contents | Verified by |
 |----------|----------|-------------|
 | `<name>.bundle` | Refs, commits, trees, blobs, tags, stashes (via temporary refs) | SHA256 + clone-and-compare |
-| `<name>.extras.tar.gz` | Untracked files, `.git/config`, custom hooks | SHA256 |
+| `<name>.extras.tar.gz` | Untracked files, `.git/config`, `config.worktree`, custom hooks | SHA256 + content verification |
 | `<name>.json` | Manifest with all metadata, hashes, and verification timestamps | Human and machine readable |
 
 A plain `git bundle --all` captures refs and reachable objects but **not** the working tree, stash reflog, hooks, or per-repo config. Ward fills those gaps explicitly.
@@ -296,4 +301,4 @@ Not yet implemented.
 
 ## Licence
 
-Private. Not currently published.
+MIT. See [LICENSE](LICENSE).
