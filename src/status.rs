@@ -24,6 +24,7 @@ const ARTIFACT_DIRS: &[&str] = &[
     ".swc",
     ".pnpm-store",
     ".venv",
+    ".export-venv",
     "venv",
     ".ruff_cache",
     ".mypy_cache",
@@ -202,12 +203,20 @@ pub fn run(path: Option<PathBuf>, no_cache: bool, as_json: bool) -> Result<()> {
         }
     }
 
+    if artifact_size > 0 {
+        println!();
+        println!(
+            "  Run {} to reclaim {} of build artefacts",
+            "ward clean".bold(),
+            format_size(artifact_size).red()
+        );
+    }
+
     let archivable = assessments
         .iter()
         .filter(|a| a.verdict == Verdict::Archive || a.verdict == Verdict::Prototype)
         .count();
     if archivable > 0 {
-        println!();
         println!(
             "  {} repo(s) ready for {}",
             archivable,

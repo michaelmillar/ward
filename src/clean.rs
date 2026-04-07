@@ -44,6 +44,7 @@ const BUILTIN_RULES: &[BuiltinRule] = &[
     BuiltinRule { name: ".gradle", ecosystem: "gradle", requires_sibling: None },
     BuiltinRule { name: "__pycache__", ecosystem: "python", requires_sibling: None },
     BuiltinRule { name: ".venv", ecosystem: "python", requires_sibling: None },
+    BuiltinRule { name: ".export-venv", ecosystem: "python", requires_sibling: None },
     BuiltinRule {
         name: "venv",
         ecosystem: "python",
