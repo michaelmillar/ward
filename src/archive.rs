@@ -244,6 +244,8 @@ fn archive_one(a: &Assessment, archive_dir: &Path) -> Result<()> {
         }
         println!("    capturing extras [{}]", parts.join(", "));
         create_extras_tar(&a.path, &extras_path, &hooks, has_config, has_config_worktree)?;
+        verify_extras_tar(&extras_path, &a.path, &hooks, has_config, has_config_worktree)?;
+        println!("    extras verified");
         Some(bundle::sha256_file(&extras_path)?)
     } else {
         None
@@ -328,6 +330,43 @@ fn compare_refs(a: &Assessment, verified: &bundle::VerifiedRefs) -> Result<()> {
     }
     if verified.refs.is_empty() {
         bail!("Verification clone contains no refs");
+    }
+    Ok(())
+}
+
+fn verify_extras_tar(
+    extras_path: &Path,
+    _repo: &Path,
+    hooks: &[PathBuf],
+    has_config: bool,
+    has_config_worktree: bool,
+) -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let file = fs::File::open(extras_path)?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut ar = tar::Archive::new(gz);
+    ar.unpack(tmp.path())?;
+
+    if has_config {
+        let extracted = tmp.path().join(".ward-extras/config");
+        anyhow::ensure!(extracted.exists(), "extras tar missing .ward-extras/config");
+    }
+    if has_config_worktree {
+        let extracted = tmp.path().join(".ward-extras/config.worktree");
+        anyhow::ensure!(
+            extracted.exists(),
+            "extras tar missing .ward-extras/config.worktree"
+        );
+    }
+    for hook in hooks {
+        if let Some(name) = hook.file_name() {
+            let extracted = tmp.path().join(".ward-extras/hooks").join(name);
+            anyhow::ensure!(
+                extracted.exists(),
+                "extras tar missing hook {}",
+                name.to_string_lossy()
+            );
+        }
     }
     Ok(())
 }
