@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::util::ward_home;
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Config {
     #[serde(default)]
     pub workspace: Workspace,
@@ -17,15 +17,9 @@ pub struct Config {
     pub exclude: Exclude,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct Workspace {
     pub root: Option<String>,
-}
-
-impl Default for Workspace {
-    fn default() -> Self {
-        Self { root: None }
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -61,16 +55,6 @@ pub struct Exclude {
     pub paths: Vec<String>,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            workspace: Workspace::default(),
-            thresholds: Thresholds::default(),
-            artefact_rules: Vec::new(),
-            exclude: Exclude::default(),
-        }
-    }
-}
 
 impl Config {
     pub fn path() -> PathBuf {

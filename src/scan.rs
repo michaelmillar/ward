@@ -65,7 +65,7 @@ pub fn run(
 
     let filter_verdict = verdict_filter
         .as_deref()
-        .and_then(|s| parse_verdict(s));
+        .and_then(parse_verdict);
 
     if let Some(v) = filter_verdict {
         assessments.retain(|a| a.verdict == v);

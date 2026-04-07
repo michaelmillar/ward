@@ -84,15 +84,17 @@ pub fn assess_repo(path: &Path, thresholds: &Thresholds) -> Result<Assessment> {
     };
 
     let verdict = classify(
-        origin_url.is_some(),
-        all_pushed,
-        has_local_only,
-        has_ahead,
-        dirty,
-        commit_count,
-        author_count,
-        lifetime_days,
-        age_days,
+        &RepoFacts {
+            has_remote: origin_url.is_some(),
+            all_pushed,
+            has_local_only,
+            has_ahead,
+            dirty,
+            commit_count,
+            author_count,
+            lifetime_days,
+            age_days,
+        },
         thresholds,
     );
 
@@ -118,7 +120,7 @@ pub fn assess_repo(path: &Path, thresholds: &Thresholds) -> Result<Assessment> {
     })
 }
 
-fn classify(
+struct RepoFacts {
     has_remote: bool,
     all_pushed: bool,
     has_local_only: bool,
@@ -128,36 +130,37 @@ fn classify(
     author_count: u64,
     lifetime_days: Option<i64>,
     age_days: Option<i64>,
-    t: &Thresholds,
-) -> Verdict {
+}
+
+fn classify(f: &RepoFacts, t: &Thresholds) -> Verdict {
     let is_prototype = |with_commits_lower_bound: bool| {
         let has_min_commits = if with_commits_lower_bound {
-            commit_count > 0
+            f.commit_count > 0
         } else {
             true
         };
         has_min_commits
-            && commit_count < t.prototype_max_commits
-            && author_count <= t.prototype_max_authors
-            && lifetime_days
+            && f.commit_count < t.prototype_max_commits
+            && f.author_count <= t.prototype_max_authors
+            && f.lifetime_days
                 .map(|d| d < t.prototype_max_lifetime_days)
                 .unwrap_or(false)
     };
 
-    if dirty {
+    if f.dirty {
         return Verdict::HasLocalWork;
     }
-    if !has_remote {
+    if !f.has_remote {
         if is_prototype(true) {
             return Verdict::Prototype;
         }
         return Verdict::NoRemote;
     }
-    if has_ahead || has_local_only {
+    if f.has_ahead || f.has_local_only {
         return Verdict::HasLocalWork;
     }
-    if all_pushed {
-        let old = age_days.map(|d| d > t.archive_stale_days).unwrap_or(false);
+    if f.all_pushed {
+        let old = f.age_days.map(|d| d > t.archive_stale_days).unwrap_or(false);
         if is_prototype(false) {
             return Verdict::Prototype;
         }
