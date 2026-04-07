@@ -80,7 +80,7 @@ Existing tools mostly clean build artefacts or caches. Ward answers a different 
 ## Install
 
 ```
-cargo install ward
+cargo install git-ward
 ```
 
 Or build from source:

@@ -1,5 +1,5 @@
 [package]
-name = "ward"
+name = "git-ward"
 version = "0.2.0"
 edition = "2021"
 description = "Proof-before-delete archival for local Git repositories"
