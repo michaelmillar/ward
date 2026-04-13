@@ -429,8 +429,7 @@ pub fn effective_hooks_path(repo: &Path) -> Option<PathBuf> {
 }
 
 pub fn custom_hooks(repo: &Path) -> Vec<PathBuf> {
-    let hooks_dir = effective_hooks_path(repo)
-        .unwrap_or_else(|| repo.join(".git/hooks"));
+    let hooks_dir = effective_hooks_path(repo).unwrap_or_else(|| repo.join(".git/hooks"));
     if !hooks_dir.is_dir() {
         return Vec::new();
     }

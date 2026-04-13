@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
@@ -37,8 +37,8 @@ pub fn verify(bundle: &Path) -> Result<()> {
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut file =
+        fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 65536];
     loop {

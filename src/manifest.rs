@@ -54,8 +54,7 @@ pub struct RemoteEntry {
 }
 
 pub fn write(manifest: &Manifest, path: &Path) -> Result<()> {
-    let json = serde_json::to_string_pretty(manifest)
-        .context("Failed to serialise manifest")?;
+    let json = serde_json::to_string_pretty(manifest).context("Failed to serialise manifest")?;
     fs::write(path, json)
         .with_context(|| format!("Failed to write manifest to {}", path.display()))?;
     Ok(())

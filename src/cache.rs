@@ -85,4 +85,3 @@ pub fn git_mtime_secs(repo: &Path) -> Option<u64> {
     let secs = mtime.duration_since(UNIX_EPOCH).ok()?.as_secs();
     Some(secs)
 }
-

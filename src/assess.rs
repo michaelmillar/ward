@@ -71,13 +71,13 @@ pub fn assess_repo(path: &Path, thresholds: &Thresholds) -> Result<Assessment> {
     let worktree_count = git::worktree_paths(path).len().saturating_sub(1) as u64;
     let submodule_count = git::submodule_count(path);
 
-    let all_pushed = branches.iter().all(|b| b.upstream.is_some() && b.ahead == 0);
+    let all_pushed = branches
+        .iter()
+        .all(|b| b.upstream.is_some() && b.ahead == 0);
     let has_local_only = branches.iter().any(|b| b.upstream.is_none());
     let has_ahead = branches.iter().any(|b| b.ahead > 0);
 
-    let age_days = last_commit.map(|d| {
-        (Utc::now().date_naive() - d).num_days()
-    });
+    let age_days = last_commit.map(|d| (Utc::now().date_naive() - d).num_days());
     let lifetime_days = match (first_commit, last_commit) {
         (Some(f), Some(l)) => Some((l - f).num_days()),
         _ => None,
@@ -160,7 +160,10 @@ fn classify(f: &RepoFacts, t: &Thresholds) -> Verdict {
         return Verdict::HasLocalWork;
     }
     if f.all_pushed {
-        let old = f.age_days.map(|d| d > t.archive_stale_days).unwrap_or(false);
+        let old = f
+            .age_days
+            .map(|d| d > t.archive_stale_days)
+            .unwrap_or(false);
         if is_prototype(false) {
             return Verdict::Prototype;
         }
@@ -195,8 +198,7 @@ pub fn print_safety_proof(a: &Assessment) {
     println!("      head             {}", short_sha(&a.head_sha).dimmed());
     println!(
         "      commits          {} across {} author(s)",
-        a.commit_count,
-        a.author_count
+        a.commit_count, a.author_count
     );
     println!(
         "      branches         {} ({} local-only, {} ahead)",
@@ -208,17 +210,29 @@ pub fn print_safety_proof(a: &Assessment) {
         println!("      local-only refs  {}", local_only.join(", ").yellow());
     }
     if !ahead_branches.is_empty() {
-        println!("      ahead branches   {}", ahead_branches.join(", ").yellow());
+        println!(
+            "      ahead branches   {}",
+            ahead_branches.join(", ").yellow()
+        );
     }
     println!("      uncommitted      {}", yes_no(a.dirty, true));
-    println!("      stashes          {}", count_colour(a.stash_count, true));
-    println!("      tags             {}", a.tag_count.to_string().dimmed());
+    println!(
+        "      stashes          {}",
+        count_colour(a.stash_count, true)
+    );
+    println!(
+        "      tags             {}",
+        a.tag_count.to_string().dimmed()
+    );
     println!(
         "      untracked        {} (ignored {})",
         count_colour(a.untracked, true),
         a.ignored.to_string().dimmed()
     );
-    println!("      worktrees        {}", a.worktree_count.to_string().dimmed());
+    println!(
+        "      worktrees        {}",
+        a.worktree_count.to_string().dimmed()
+    );
     if a.submodule_count > 0 {
         println!(
             "      submodules       {}",

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use colored::Colorize;
 use flate2::read::GzDecoder;
 use std::fs;
@@ -60,12 +60,7 @@ fn list(dir: &Path) -> Result<()> {
         } else {
             "unverified".red()
         };
-        println!(
-            "  {} [{}] [{}]",
-            stem.cyan().bold(),
-            format_tag,
-            verified
-        );
+        println!("  {} [{}] [{}]", stem.cyan().bold(), format_tag, verified);
         println!(
             "    from {} ({} refs, {} commits)",
             m.original_path.dimmed(),
@@ -172,15 +167,23 @@ fn verify_archive(dir: &Path, name: &str) -> Result<()> {
         println!("  {} hooks preserved in extras", "ok".green().bold());
     }
     if m.has_config {
-        println!("  {} per-repo config preserved in extras", "ok".green().bold());
+        println!(
+            "  {} per-repo config preserved in extras",
+            "ok".green().bold()
+        );
     }
     if m.has_config_worktree {
-        println!("  {} worktree config preserved in extras", "ok".green().bold());
+        println!(
+            "  {} worktree config preserved in extras",
+            "ok".green().bold()
+        );
     }
 
     println!(
         "{}",
-        "Archive refs, history, and local state are restorable.".green().bold()
+        "Archive refs, history, and local state are restorable."
+            .green()
+            .bold()
     );
     Ok(())
 }
@@ -234,9 +237,7 @@ fn restore_one(dir: &Path, name: &str) -> Result<()> {
             }
         }
         ArchiveFormat::Tarball => {
-            let parent = target
-                .parent()
-                .context("could not determine parent dir")?;
+            let parent = target.parent().context("could not determine parent dir")?;
             fs::create_dir_all(parent)?;
             let file = fs::File::open(&primary)?;
             let decoder = GzDecoder::new(file);
@@ -293,8 +294,7 @@ fn extract_extras(tar_path: &Path, target: &Path) -> Result<()> {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ =
-                            fs::set_permissions(&dst, fs::Permissions::from_mode(0o755));
+                        let _ = fs::set_permissions(&dst, fs::Permissions::from_mode(0o755));
                     }
                 }
             }
