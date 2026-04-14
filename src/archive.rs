@@ -1,18 +1,18 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use colored::Colorize;
-use flate2::Compression;
 use flate2::write::GzEncoder;
+use flate2::Compression;
 use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::assess::{Assessment, Verdict, assess_repo, print_safety_proof};
+use crate::assess::{assess_repo, print_safety_proof, Assessment, Verdict};
 use crate::bundle;
 use crate::cache::Cache;
-use crate::config::Config;
+use crate::config::{Config, ExcludeOpts, Exclusions};
 use crate::git;
-use crate::manifest::{self, ArchiveFormat, MANIFEST_VERSION, Manifest, RefEntry, RemoteEntry};
+use crate::manifest::{self, ArchiveFormat, Manifest, RefEntry, RemoteEntry, MANIFEST_VERSION};
 use crate::util::{archives_dir, default_projects_path, format_size};
 
 const VERIFIER_VERSION: &str = concat!("ward ", env!("CARGO_PKG_VERSION"));
@@ -24,6 +24,7 @@ pub fn run(
     include_no_remote: bool,
     no_cache: bool,
     as_json: bool,
+    exclude_opts: ExcludeOpts,
 ) -> Result<()> {
     let cfg = Config::load();
     let root = path
@@ -40,9 +41,10 @@ pub fn run(
         );
     }
 
+    let exclusions = Exclusions::build(&cfg, &exclude_opts);
     let repos: Vec<_> = git::find_git_repos(&root)
         .into_iter()
-        .filter(|r| !cfg.is_excluded(r))
+        .filter(|r| !exclusions.is_excluded(r))
         .collect();
     if repos.is_empty() {
         if !as_json {
@@ -53,7 +55,11 @@ pub fn run(
         return Ok(());
     }
 
-    let mut cache = if no_cache { Cache::default() } else { Cache::load() };
+    let mut cache = if no_cache {
+        Cache::default()
+    } else {
+        Cache::load()
+    };
     let thresholds = cfg.thresholds.clone();
 
     let mut assessments: Vec<Assessment> = repos
@@ -209,7 +215,10 @@ fn archive_one(a: &Assessment, archive_dir: &Path) -> Result<()> {
     let manifest_path = archive_dir.join(format!("{stem}.json"));
 
     let stash_shas = if a.stash_count > 0 {
-        println!("    preserving {} stash(es) as temp refs ...", a.stash_count);
+        println!(
+            "    preserving {} stash(es) as temp refs ...",
+            a.stash_count
+        );
         git::create_stash_refs(&a.path).unwrap_or_default()
     } else {
         Vec::new()
@@ -243,8 +252,20 @@ fn archive_one(a: &Assessment, archive_dir: &Path) -> Result<()> {
             parts.push("config.worktree".to_string());
         }
         println!("    capturing extras [{}]", parts.join(", "));
-        create_extras_tar(&a.path, &extras_path, &hooks, has_config, has_config_worktree)?;
-        verify_extras_tar(&extras_path, &a.path, &hooks, has_config, has_config_worktree)?;
+        create_extras_tar(
+            &a.path,
+            &extras_path,
+            &hooks,
+            has_config,
+            has_config_worktree,
+        )?;
+        verify_extras_tar(
+            &extras_path,
+            &a.path,
+            &hooks,
+            has_config,
+            has_config_worktree,
+        )?;
         println!("    extras verified");
         Some(bundle::sha256_file(&extras_path)?)
     } else {
@@ -426,4 +447,3 @@ fn create_extras_tar(
     archive.finish()?;
     Ok(())
 }
-

@@ -1,11 +1,11 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use colored::Colorize;
 use rayon::prelude::*;
 use std::path::PathBuf;
 
-use crate::assess::{Assessment, Verdict, assess_repo};
+use crate::assess::{assess_repo, Assessment, Verdict};
 use crate::cache::Cache;
-use crate::config::Config;
+use crate::config::{Config, ExcludeOpts, Exclusions};
 use crate::git;
 use crate::util::{default_projects_path, format_size};
 
@@ -15,6 +15,7 @@ pub fn run(
     verdict_filter: Option<String>,
     no_cache: bool,
     as_json: bool,
+    exclude_opts: ExcludeOpts,
 ) -> Result<()> {
     let cfg = Config::load();
     let root = path
@@ -28,9 +29,10 @@ pub fn run(
         println!("{}", format!("Scanning {} ...", root.display()).dimmed());
     }
 
+    let exclusions = Exclusions::build(&cfg, &exclude_opts);
     let repos: Vec<_> = git::find_git_repos(&root)
         .into_iter()
-        .filter(|r| !cfg.is_excluded(r))
+        .filter(|r| !exclusions.is_excluded(r))
         .collect();
     if repos.is_empty() {
         if !as_json {
@@ -41,7 +43,11 @@ pub fn run(
         return Ok(());
     }
 
-    let mut cache = if no_cache { Cache::default() } else { Cache::load() };
+    let mut cache = if no_cache {
+        Cache::default()
+    } else {
+        Cache::load()
+    };
     let thresholds = cfg.thresholds.clone();
 
     let mut assessments: Vec<Assessment> = repos
@@ -63,9 +69,7 @@ pub fn run(
         let _ = cache.save();
     }
 
-    let filter_verdict = verdict_filter
-        .as_deref()
-        .and_then(parse_verdict);
+    let filter_verdict = verdict_filter.as_deref().and_then(parse_verdict);
 
     if let Some(v) = filter_verdict {
         assessments.retain(|a| a.verdict == v);
@@ -153,9 +157,18 @@ fn print_row(a: &Assessment) {
 }
 
 fn print_next_actions(assessments: &[Assessment]) {
-    let archive_count = assessments.iter().filter(|a| a.verdict == Verdict::Archive).count();
-    let proto_count = assessments.iter().filter(|a| a.verdict == Verdict::Prototype).count();
-    let noremote_count = assessments.iter().filter(|a| a.verdict == Verdict::NoRemote).count();
+    let archive_count = assessments
+        .iter()
+        .filter(|a| a.verdict == Verdict::Archive)
+        .count();
+    let proto_count = assessments
+        .iter()
+        .filter(|a| a.verdict == Verdict::Prototype)
+        .count();
+    let noremote_count = assessments
+        .iter()
+        .filter(|a| a.verdict == Verdict::NoRemote)
+        .count();
 
     if archive_count > 0 {
         println!(

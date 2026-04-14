@@ -1,9 +1,10 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use colored::Colorize;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::config::{Config, ExcludeOpts, Exclusions};
 use crate::git::{self, normalise_remote_url};
 use crate::util::{default_projects_path, dir_size, format_size};
 
@@ -17,7 +18,8 @@ struct CloneInfo {
     dirty: bool,
 }
 
-pub fn run(path: Option<PathBuf>, convert: bool) -> Result<()> {
+pub fn run(path: Option<PathBuf>, convert: bool, exclude_opts: ExcludeOpts) -> Result<()> {
+    let cfg = Config::load();
     let root = path.unwrap_or_else(default_projects_path);
     if !root.exists() {
         bail!("Path does not exist: {}", root.display());
@@ -28,7 +30,11 @@ pub fn run(path: Option<PathBuf>, convert: bool) -> Result<()> {
         format!("Scanning {} for duplicate clones ...", root.display()).dimmed()
     );
 
-    let repos = git::find_git_repos(&root);
+    let exclusions = Exclusions::build(&cfg, &exclude_opts);
+    let repos: Vec<_> = git::find_git_repos(&root)
+        .into_iter()
+        .filter(|r| !exclusions.is_excluded(r))
+        .collect();
     let enriched: Vec<(String, String, CloneInfo)> = repos
         .par_iter()
         .filter_map(|r| {
@@ -147,8 +153,7 @@ pub fn run(path: Option<PathBuf>, convert: bool) -> Result<()> {
         println!();
         println!(
             "{}",
-            "Dry run. Use --convert to execute the worktree and removal plan."
-                .yellow()
+            "Dry run. Use --convert to execute the worktree and removal plan.".yellow()
         );
         return Ok(());
     }
@@ -240,7 +245,9 @@ fn print_action_rationale(c: &CloneInfo, action: Action) {
         println!(
             "          {} {}",
             "warn".yellow().bold().dimmed(),
-            "no root commit found, fingerprint may be weak".yellow().dimmed()
+            "no root commit found, fingerprint may be weak"
+                .yellow()
+                .dimmed()
         );
     }
 }
@@ -250,7 +257,9 @@ fn convert_to_worktree(keeper: &std::path::Path, target: &std::path::Path) -> Re
         .args(["branch", "--show-current"])
         .current_dir(target)
         .output()?;
-    let branch = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+    let branch = String::from_utf8_lossy(&branch_out.stdout)
+        .trim()
+        .to_string();
     if branch.is_empty() {
         bail!("target has detached HEAD, refusing to convert");
     }

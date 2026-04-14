@@ -1,12 +1,12 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use colored::Colorize;
 use rayon::prelude::*;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-use crate::assess::{Assessment, Verdict, assess_repo};
+use crate::assess::{assess_repo, Assessment, Verdict};
 use crate::cache::Cache;
-use crate::config::Config;
+use crate::config::{Config, ExcludeOpts, Exclusions};
 use crate::git;
 use crate::util::{default_projects_path, dir_size, format_size};
 
@@ -37,8 +37,14 @@ const ARTIFACT_DIRS: &[&str] = &[
     "DerivedData",
 ];
 
-pub fn run(path: Option<PathBuf>, no_cache: bool, as_json: bool) -> Result<()> {
+pub fn run(
+    path: Option<PathBuf>,
+    no_cache: bool,
+    as_json: bool,
+    exclude_opts: ExcludeOpts,
+) -> Result<()> {
     let cfg = Config::load();
+    let exclusions = Exclusions::build(&cfg, &exclude_opts);
     let root = path
         .or_else(|| cfg.workspace_root())
         .unwrap_or_else(default_projects_path);
@@ -119,11 +125,15 @@ pub fn run(path: Option<PathBuf>, no_cache: bool, as_json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let mut cache = if no_cache { Cache::default() } else { Cache::load() };
+    let mut cache = if no_cache {
+        Cache::default()
+    } else {
+        Cache::load()
+    };
     let thresholds = cfg.thresholds.clone();
     let assessments: Vec<Assessment> = repos
         .par_iter()
-        .filter(|r| !cfg.is_excluded(r))
+        .filter(|r| !exclusions.is_excluded(r))
         .filter_map(|r| {
             if !no_cache {
                 if let Some(a) = cache.lookup(r) {

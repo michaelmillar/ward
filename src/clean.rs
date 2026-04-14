@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use chrono::{NaiveDate, Utc};
 use colored::Colorize;
 use rayon::prelude::*;
@@ -6,7 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::config::Config;
+use crate::config::{Config, ExcludeOpts, Exclusions};
 use crate::git;
 use crate::util::{default_projects_path, dir_size, format_size};
 
@@ -17,14 +17,46 @@ struct ArtifactRule {
 }
 
 const BUILTIN_RULES: &[BuiltinRule] = &[
-    BuiltinRule { name: "target", ecosystem: "rust", requires_sibling: Some(&["Cargo.toml"]) },
-    BuiltinRule { name: "node_modules", ecosystem: "node", requires_sibling: None },
-    BuiltinRule { name: ".next", ecosystem: "nextjs", requires_sibling: None },
-    BuiltinRule { name: ".turbo", ecosystem: "turbo", requires_sibling: None },
-    BuiltinRule { name: ".vite", ecosystem: "vite", requires_sibling: None },
-    BuiltinRule { name: ".parcel-cache", ecosystem: "parcel", requires_sibling: None },
-    BuiltinRule { name: ".swc", ecosystem: "swc", requires_sibling: None },
-    BuiltinRule { name: ".pnpm-store", ecosystem: "pnpm", requires_sibling: None },
+    BuiltinRule {
+        name: "target",
+        ecosystem: "rust",
+        requires_sibling: Some(&["Cargo.toml"]),
+    },
+    BuiltinRule {
+        name: "node_modules",
+        ecosystem: "node",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".next",
+        ecosystem: "nextjs",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".turbo",
+        ecosystem: "turbo",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".vite",
+        ecosystem: "vite",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".parcel-cache",
+        ecosystem: "parcel",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".swc",
+        ecosystem: "swc",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".pnpm-store",
+        ecosystem: "pnpm",
+        requires_sibling: None,
+    },
     BuiltinRule {
         name: "dist",
         ecosystem: "node",
@@ -41,25 +73,81 @@ const BUILTIN_RULES: &[BuiltinRule] = &[
         ecosystem: "gradle/cmake",
         requires_sibling: Some(&["build.gradle", "build.gradle.kts", "CMakeLists.txt"]),
     },
-    BuiltinRule { name: ".gradle", ecosystem: "gradle", requires_sibling: None },
-    BuiltinRule { name: "__pycache__", ecosystem: "python", requires_sibling: None },
-    BuiltinRule { name: ".venv", ecosystem: "python", requires_sibling: None },
-    BuiltinRule { name: ".export-venv", ecosystem: "python", requires_sibling: None },
+    BuiltinRule {
+        name: ".gradle",
+        ecosystem: "gradle",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: "__pycache__",
+        ecosystem: "python",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".venv",
+        ecosystem: "python",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".export-venv",
+        ecosystem: "python",
+        requires_sibling: None,
+    },
     BuiltinRule {
         name: "venv",
         ecosystem: "python",
         requires_sibling: Some(&["pyproject.toml", "requirements.txt", "setup.py"]),
     },
-    BuiltinRule { name: ".ruff_cache", ecosystem: "python", requires_sibling: None },
-    BuiltinRule { name: ".mypy_cache", ecosystem: "python", requires_sibling: None },
-    BuiltinRule { name: ".pytest_cache", ecosystem: "python", requires_sibling: None },
-    BuiltinRule { name: ".tox", ecosystem: "python", requires_sibling: None },
-    BuiltinRule { name: ".nox", ecosystem: "python", requires_sibling: None },
-    BuiltinRule { name: "out", ecosystem: "go", requires_sibling: Some(&["go.mod"]) },
-    BuiltinRule { name: "zig-cache", ecosystem: "zig", requires_sibling: None },
-    BuiltinRule { name: "zig-out", ecosystem: "zig", requires_sibling: None },
-    BuiltinRule { name: ".dart_tool", ecosystem: "dart", requires_sibling: None },
-    BuiltinRule { name: "DerivedData", ecosystem: "xcode", requires_sibling: None },
+    BuiltinRule {
+        name: ".ruff_cache",
+        ecosystem: "python",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".mypy_cache",
+        ecosystem: "python",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".pytest_cache",
+        ecosystem: "python",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".tox",
+        ecosystem: "python",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".nox",
+        ecosystem: "python",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: "out",
+        ecosystem: "go",
+        requires_sibling: Some(&["go.mod"]),
+    },
+    BuiltinRule {
+        name: "zig-cache",
+        ecosystem: "zig",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: "zig-out",
+        ecosystem: "zig",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: ".dart_tool",
+        ecosystem: "dart",
+        requires_sibling: None,
+    },
+    BuiltinRule {
+        name: "DerivedData",
+        ecosystem: "xcode",
+        requires_sibling: None,
+    },
 ];
 
 struct BuiltinRule {
@@ -171,6 +259,20 @@ fn find_artifacts(root: &Path, rules: &[ArtifactRule]) -> Vec<Artifact> {
     artifacts
 }
 
+fn artifact_in_excluded_project(artifact: &Path, exclusions: &Exclusions) -> bool {
+    let mut cursor = artifact.parent();
+    while let Some(dir) = cursor {
+        if exclusions.is_excluded(dir) {
+            return true;
+        }
+        if dir.join(".git").exists() {
+            return false;
+        }
+        cursor = dir.parent();
+    }
+    false
+}
+
 fn parse_duration(s: &str) -> Result<i64> {
     let s = s.trim();
     if let Some(days) = s.strip_suffix('d') {
@@ -182,8 +284,14 @@ fn parse_duration(s: &str) -> Result<i64> {
     }
 }
 
-pub fn run(path: Option<PathBuf>, execute: bool, older_than: Option<String>) -> Result<()> {
+pub fn run(
+    path: Option<PathBuf>,
+    execute: bool,
+    older_than: Option<String>,
+    exclude_opts: ExcludeOpts,
+) -> Result<()> {
     let cfg = Config::load();
+    let exclusions = Exclusions::build(&cfg, &exclude_opts);
     let root = path
         .or_else(|| cfg.workspace_root())
         .unwrap_or_else(default_projects_path);
@@ -205,6 +313,10 @@ pub fn run(path: Option<PathBuf>, execute: bool, older_than: Option<String>) -> 
 
     let rules = all_rules(&cfg);
     let mut artifacts = find_artifacts(&root, &rules);
+
+    if !exclusions.is_empty() {
+        artifacts.retain(|a| !artifact_in_excluded_project(&a.path, &exclusions));
+    }
 
     if let Some(cutoff_date) = cutoff {
         artifacts.retain(|a| a.last_modified.map(|d| d < cutoff_date).unwrap_or(true));
@@ -281,8 +393,12 @@ pub fn run(path: Option<PathBuf>, execute: bool, older_than: Option<String>) -> 
     Ok(())
 }
 
-pub fn total_reclaimable(root: &Path) -> u64 {
+pub fn total_reclaimable(root: &Path, exclusions: &Exclusions) -> u64 {
     let cfg = Config::load();
     let rules = all_rules(&cfg);
-    find_artifacts(root, &rules).iter().map(|a| a.size).sum()
+    find_artifacts(root, &rules)
+        .iter()
+        .filter(|a| exclusions.is_empty() || !artifact_in_excluded_project(&a.path, exclusions))
+        .map(|a| a.size)
+        .sum()
 }
