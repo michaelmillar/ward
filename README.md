@@ -214,7 +214,7 @@ prototype_max_lifetime_days = 30
 
 ### Custom artefact rules
 
-Add your own artefact patterns alongside the 25+ built-in rules.
+Add your own artefact patterns alongside the 25 built-in rules.
 
 ```toml
 [[artefact_rules]]
@@ -291,7 +291,7 @@ Modified tracked files in the working tree (uncommitted changes to tracked files
 
 ## Status
 
-Single binary, ~3000 lines of Rust. Pure Rust, no runtime C dependencies (SQLite is bundled for optional pm integration).
+Single binary, ~3500 lines of Rust. Pure Rust, no runtime C dependencies (SQLite is bundled for optional pm integration).
 
 Not yet implemented.
 
