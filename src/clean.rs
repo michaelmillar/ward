@@ -148,7 +148,34 @@ const BUILTIN_RULES: &[BuiltinRule] = &[
         ecosystem: "xcode",
         requires_sibling: None,
     },
+    BuiltinRule {
+        name: "_build",
+        ecosystem: "elixir",
+        requires_sibling: Some(&["mix.exs"]),
+    },
+    BuiltinRule {
+        name: "deps",
+        ecosystem: "elixir",
+        requires_sibling: Some(&["mix.exs"]),
+    },
+    BuiltinRule {
+        name: "bin",
+        ecosystem: "dotnet",
+        requires_sibling: Some(&["*.csproj", "*.fsproj", "*.vbproj", "*.sln"]),
+    },
+    BuiltinRule {
+        name: "obj",
+        ecosystem: "dotnet",
+        requires_sibling: Some(&["*.csproj", "*.fsproj", "*.vbproj", "*.sln"]),
+    },
+    BuiltinRule {
+        name: "publish",
+        ecosystem: "dotnet",
+        requires_sibling: Some(&["*.csproj", "*.fsproj"]),
+    },
 ];
+
+const CRASH_DUMP_FILES: &[(&str, &str)] = &[("erl_crash.dump", "elixir")];
 
 struct BuiltinRule {
     name: &'static str,
@@ -183,13 +210,33 @@ struct Artifact {
     size: u64,
     ecosystem: String,
     last_modified: Option<NaiveDate>,
+    is_dir: bool,
 }
 
 fn has_sibling(dir: &Path, siblings: &[String]) -> bool {
     let Some(parent) = dir.parent() else {
         return false;
     };
-    siblings.iter().any(|s| parent.join(s).exists())
+    siblings.iter().any(|s| {
+        if let Some(ext) = s.strip_prefix("*.") {
+            let Ok(entries) = fs::read_dir(parent) else {
+                return false;
+            };
+            entries.flatten().any(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x == ext)
+                    .unwrap_or(false)
+            })
+        } else {
+            parent.join(s).exists()
+        }
+    })
+}
+
+fn is_venv_dir(dir: &Path) -> bool {
+    dir.join("pyvenv.cfg").is_file()
 }
 
 fn project_last_modified(dir: &Path) -> Option<NaiveDate> {
@@ -240,6 +287,10 @@ fn find_artifacts(root: &Path, rules: &[ArtifactRule]) -> Vec<Artifact> {
             matched = true;
             break;
         }
+        if !matched && entry.depth() > 0 && is_venv_dir(entry.path()) {
+            candidates.push((entry.path().to_path_buf(), "python".to_string()));
+            matched = true;
+        }
         if matched {
             it.skip_current_dir();
         }
@@ -252,11 +303,53 @@ fn find_artifacts(root: &Path, rules: &[ArtifactRule]) -> Vec<Artifact> {
             size: dir_size(p),
             ecosystem: eco.clone(),
             last_modified: project_last_modified(p),
+            is_dir: true,
         })
         .collect();
 
     artifacts.sort_by(|a, b| b.size.cmp(&a.size));
     artifacts
+}
+
+fn find_crash_dumps(root: &Path) -> Vec<Artifact> {
+    let mut found = Vec::new();
+    let mut it = WalkDir::new(root).into_iter();
+    loop {
+        let entry = match it.next() {
+            None => break,
+            Some(Err(_)) => continue,
+            Some(Ok(e)) => e,
+        };
+        let name = entry.file_name().to_string_lossy().to_string();
+        if entry.file_type().is_dir() {
+            if name.starts_with('.') && entry.depth() > 0 {
+                it.skip_current_dir();
+            }
+            continue;
+        }
+        for (target, eco) in CRASH_DUMP_FILES {
+            if name == *target {
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let last_modified = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| {
+                        let dt: chrono::DateTime<Utc> = t.into();
+                        dt.date_naive()
+                    });
+                found.push(Artifact {
+                    path: entry.path().to_path_buf(),
+                    size,
+                    ecosystem: (*eco).to_string(),
+                    last_modified,
+                    is_dir: false,
+                });
+                break;
+            }
+        }
+    }
+    found
 }
 
 fn artifact_in_excluded_project(artifact: &Path, exclusions: &Exclusions) -> bool {
@@ -313,6 +406,8 @@ pub fn run(
 
     let rules = all_rules(&cfg);
     let mut artifacts = find_artifacts(&root, &rules);
+    artifacts.extend(find_crash_dumps(&root));
+    artifacts.sort_by(|a, b| b.size.cmp(&a.size));
 
     if !exclusions.is_empty() {
         artifacts.retain(|a| !artifact_in_excluded_project(&a.path, &exclusions));
@@ -365,7 +460,12 @@ pub fn run(
         println!("{}", "Removing artefacts ...".red().bold());
         let mut freed = 0u64;
         for artifact in &artifacts {
-            match fs::remove_dir_all(&artifact.path) {
+            let result = if artifact.is_dir {
+                fs::remove_dir_all(&artifact.path)
+            } else {
+                fs::remove_file(&artifact.path)
+            };
+            match result {
                 Ok(()) => {
                     freed += artifact.size;
                     println!("  {} {}", "removed".red(), artifact.path.display());
@@ -396,7 +496,9 @@ pub fn run(
 pub fn total_reclaimable(root: &Path, exclusions: &Exclusions) -> u64 {
     let cfg = Config::load();
     let rules = all_rules(&cfg);
-    find_artifacts(root, &rules)
+    let mut artifacts = find_artifacts(root, &rules);
+    artifacts.extend(find_crash_dumps(root));
+    artifacts
         .iter()
         .filter(|a| exclusions.is_empty() || !artifact_in_excluded_project(&a.path, exclusions))
         .map(|a| a.size)
